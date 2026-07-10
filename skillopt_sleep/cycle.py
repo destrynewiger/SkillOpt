@@ -138,13 +138,18 @@ def run_sleep_cycle(
     )
 
     # ── 1+2. harvest + mine (unless seed_tasks injected) ─────────────────
+    # The harvest frontier is tracked per (project, source): a `claude` run and
+    # a `hermes` run over the same project must not consume each other's
+    # watermark. `claude` keeps the legacy bare-project key for back-compat.
+    _source = cfg.get("transcript_source", "claude") or "claude"
+    harvest_key = project if _source in ("claude", "") else f"{project}::{_source}"
     digests: List[SessionDigest] = []
     if seed_tasks is not None:
         tasks = seed_tasks
         n_sessions = 0
         _progress(cfg, f"using {len(tasks)} seeded tasks")
     else:
-        since = state.last_harvest_for(project)
+        since = state.last_harvest_for(harvest_key)
         # On first run (no prior harvest), apply lookback_hours so we don't
         # scan the entire transcript history and trigger massive LLM mining.
         if since is None:
@@ -209,7 +214,7 @@ def run_sleep_cycle(
     if not tasks:
         report.ended_at = _now_iso(clock)
         report.notes.append("no tasks mined — nothing to consolidate")
-        state.set_last_harvest(project, started)
+        state.set_last_harvest(harvest_key, started)
         state.record_night({"night": night, "accepted": False, "n_tasks": 0})
         if not dry_run:
             state.save()
@@ -304,7 +309,7 @@ def run_sleep_cycle(
                 }, _fh, indent=2)
         except Exception:
             pass
-        state.set_last_harvest(project, started)
+        state.set_last_harvest(harvest_key, started)
         state.record_night({
             "night": night, "accepted": result.accepted,
             "baseline": result.baseline_score, "candidate": result.candidate_score,
