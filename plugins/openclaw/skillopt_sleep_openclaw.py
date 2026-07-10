@@ -204,7 +204,12 @@ Return ONLY a single float 0.0-1.0 on one line. No explanation. No markdown.
 
         rubric_text = ""
         if failures:
-            rubric_text = f"\n\n## REFERENCE ANSWERS\n{chr(10).join(f'Q: {t.intent[:120]}\\nA: {t.reference}' for t, _ in failures[:3] if t.reference)}"
+            _refs = "\n".join(
+                f"Q: {t.intent[:120]}\nA: {t.reference}"
+                for t, _ in failures[:3]
+                if t.reference
+            )
+            rubric_text = f"\n\n## REFERENCE ANSWERS\n{_refs}"
 
         sys = (
             "You are SkillOpt-Sleep's bounded-edit optimizer. Your job is to propose 1-4 MINIMAL text edits to a skill or memory document "
