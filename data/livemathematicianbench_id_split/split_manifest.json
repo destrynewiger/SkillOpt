@@ -16,8 +16,8 @@
   "split_seed": 42,
   "counts": {
     "train": 35,
-    "val": 18,
-    "test": 124
+    "val": 17,
+    "test": 125
   },
   "item_fields": [
     "id",

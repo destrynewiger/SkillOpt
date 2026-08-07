@@ -19,7 +19,13 @@ from skillopt_sleep.cycle import run_sleep_cycle
 from skillopt_sleep.experiments.personas import programmer_persona, researcher_persona
 from skillopt_sleep.harvest import _detect_feedback, _is_meta_prompt, digest_transcript
 from skillopt_sleep.memory import apply_edits, current_learned_lines, extract_learned, set_learned
-from skillopt_sleep.mine import assign_splits, filter_tasks_for_target, heuristic_mine, mine
+from skillopt_sleep.mine import (
+    assign_splits,
+    filter_tasks_for_target,
+    group_tasks_by_skill_hint,
+    heuristic_mine,
+    mine,
+)
 from skillopt_sleep.staging import adopt
 from skillopt_sleep.types import EditRecord, SessionDigest, SleepReport, TaskRecord
 
@@ -136,6 +142,355 @@ class TestHarvest(unittest.TestCase):
         self.assertNotIn("raw args should not copy", joined)
         self.assertNotIn("raw output should not copy", joined)
 
+    def test_digest_cursor_transcript_redacts_and_keeps_only_message_text_and_tool_names(self):
+        from skillopt_sleep.harvest_cursor import digest_cursor_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cursor-session.jsonl")
+            self._write_jsonl(path, [
+                {
+                    "role": "user",
+                    "message": {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                "<attached_files>never-copy-attachment-metadata</attached_files>\n"
+                                "<user_query>\n"
+                                "Deploy with sk-1234567890abcdef and token=local-secret\n"
+                                "</user_query>"
+                            ),
+                        }],
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "message": {
+                        "content": [{
+                            "type": "tool_use",
+                            "name": "shell.execute",
+                            "input": {"token": "never-copy-tool-arguments"},
+                        }],
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Deployment finished."},
+                            {
+                                "type": "tool_use",
+                                "name": "read_file",
+                                "input": {"path": "never-copy-tool-arguments"},
+                            },
+                        ],
+                    },
+                },
+                {"type": "tool_result", "output": "never-copy-tool-output"},
+                {"type": "turn_ended", "status": "error"},
+            ])
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("null\n")
+                f.write("[]\n")
+                f.write('"non-object"\n')
+                f.write("{malformed jsonl record\\n")
+
+            digest = digest_cursor_transcript(path, project="/repo/Cursor Project")
+
+        self.assertIsNotNone(digest)
+        joined = "\n".join(digest.user_prompts + digest.assistant_finals)
+        self.assertEqual(digest.project, "/repo/Cursor Project")
+        self.assertEqual(len(digest.user_prompts), 1)
+        self.assertIn("[REDACTED_OPENAI_KEY]", joined)
+        self.assertIn("token=[REDACTED]", joined)
+        self.assertEqual(digest.tools_used, ["shell.execute", "read_file"])
+        self.assertIn("neg:cursor_turn_error", digest.feedback_signals)
+        self.assertNotIn("never-copy-tool-arguments", joined)
+        self.assertNotIn("never-copy-tool-output", joined)
+        self.assertNotIn("never-copy-attachment-metadata", joined)
+
+    def test_harvest_cursor_scopes_orders_filters_mtime_and_skips_replays(self):
+        from skillopt_sleep.__main__ import _cfg_from_args
+        from skillopt_sleep.harvest_cursor import (
+            CURSOR_REPLAY_SENTINEL,
+            cursor_project_slug,
+            harvest_cursor,
+        )
+        from skillopt_sleep.harvest_sources import harvest_for_config
+
+        def write_cursor_session(cursor_home, project, session_id, prompt, mtime, extra_prompt=""):
+            project_dir = os.path.join(
+                cursor_home,
+                "projects",
+                cursor_project_slug(project),
+            )
+            path = os.path.join(
+                project_dir,
+                "agent-transcripts",
+                session_id,
+                f"{session_id}.jsonl",
+            )
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(os.path.join(project_dir, ".workspace-trusted"), "w", encoding="utf-8") as f:
+                json.dump({"workspacePath": project}, f)
+            records = [
+                {
+                    "role": "user",
+                    "message": {
+                        "content": [{
+                            "type": "text",
+                            "text": f"<user_query>\n{prompt}\n</user_query>",
+                        }],
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "message": {"content": [{"type": "text", "text": "done"}]},
+                },
+            ]
+            if extra_prompt:
+                records.extend([
+                    {
+                        "role": "user",
+                        "message": {
+                            "content": [{
+                                "type": "text",
+                                "text": f"<user_query>\n{extra_prompt}\n</user_query>",
+                            }],
+                        },
+                    },
+                    {
+                        "role": "assistant",
+                        "message": {"content": [{"type": "text", "text": "done again"}]},
+                    },
+                ])
+            self._write_jsonl(path, records)
+            os.utime(path, (mtime, mtime))
+            return path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cursor_home = os.path.join(tmp, ".cursor")
+            project = os.path.join(tmp, "project with spaces")
+            other_project = os.path.join(tmp, "other project")
+            old_time = 1_700_000_000
+            new_time = old_time + 3_600
+            main_path = write_cursor_session(
+                cursor_home,
+                project,
+                "older",
+                "fix the first issue",
+                old_time,
+            )
+            subagent_path = os.path.join(os.path.dirname(main_path), "subagents", "worker.jsonl")
+            os.makedirs(os.path.dirname(subagent_path), exist_ok=True)
+            self._write_jsonl(subagent_path, [
+                {"role": "user", "message": {"content": "machine-generated subagent task"}},
+                {"role": "assistant", "message": {"content": "subagent result"}},
+            ])
+            write_cursor_session(cursor_home, other_project, "newer", "fix the second issue", new_time)
+            write_cursor_session(
+                cursor_home,
+                other_project,
+                "generated-replay",
+                CURSOR_REPLAY_SENTINEL + "\n## CURRENT SKILL",
+                new_time + 1,
+                extra_prompt="continue the internal replay",
+            )
+
+            invoked = harvest_cursor(
+                os.path.join(cursor_home, "projects"),
+                scope="invoked",
+                invoked_project=os.path.join(project, "src", "package"),
+            )
+            all_digests = harvest_cursor(
+                os.path.join(cursor_home, "projects"),
+                scope="all",
+                since_iso="2023-11-14T23:00:00Z",
+                limit=1,
+            )
+
+            Args = type("Args", (), {
+                "project": project,
+                "scope": "",
+                "backend": "cursor",
+                "model": "",
+                "codex_path": "",
+                "cursor_path": "",
+                "claude_home": "",
+                "codex_home": "",
+                "cursor_home": cursor_home,
+                "source": "cursor",
+                "lookback_hours": 0,
+                "edit_budget": 0,
+                "max_sessions": 0,
+                "max_tasks": 0,
+                "target_skill_path": "",
+                "preferences": "",
+                "progress": False,
+                "auto_adopt": False,
+            })
+            cfg = _cfg_from_args(Args())
+            configured = harvest_for_config(cfg)
+
+        self.assertEqual([d.session_id for d in invoked], ["older"])
+        self.assertEqual([d.session_id for d in all_digests], ["newer"])
+        self.assertEqual(invoked[0].project, project)
+        self.assertEqual(all_digests[0].project, other_project)
+        self.assertEqual([d.session_id for d in configured], ["older"])
+        self.assertEqual(cfg.get("transcript_source"), "cursor")
+        self.assertEqual(cfg.get("backend"), "cursor")
+
+    def test_harvest_cursor_prefers_longest_workspace_and_falls_back_to_slug(self):
+        from skillopt_sleep.harvest_cursor import cursor_project_slug, harvest_cursor
+
+        def write_session(projects_dir, storage_name, workspace, session_id):
+            project_dir = os.path.join(projects_dir, storage_name)
+            path = os.path.join(project_dir, "agent-transcripts", session_id, f"{session_id}.jsonl")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._write_jsonl(path, [
+                {"role": "user", "message": {"content": "please fix this project"}},
+                {"role": "assistant", "message": {"content": "fixed"}},
+            ])
+            if workspace is not None:
+                with open(os.path.join(project_dir, ".workspace-trusted"), "w", encoding="utf-8") as f:
+                    json.dump(workspace, f)
+            return path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            projects_dir = os.path.join(tmp, ".cursor", "projects")
+            parent = os.path.join(tmp, "repo")
+            nested = os.path.join(parent, "packages", "app")
+            write_session(projects_dir, "parent-store", {"workspacePath": parent}, "parent")
+            write_session(projects_dir, "nested-store", {"workspacePath": nested}, "nested")
+            fallback = os.path.join(tmp, "fallback")
+            write_session(
+                projects_dir,
+                cursor_project_slug(fallback),
+                ["invalid metadata shape"],
+                "fallback",
+            )
+            metadata_free = os.path.join(tmp, "metadata-free")
+            write_session(
+                projects_dir,
+                cursor_project_slug(metadata_free),
+                None,
+                "metadata-free",
+            )
+            mixed_parent = os.path.join(tmp, "mixed-parent")
+            mixed_nested = os.path.join(mixed_parent, "nested")
+            write_session(projects_dir, "mixed-parent-store", {"workspacePath": mixed_parent}, "mixed-parent")
+            write_session(
+                projects_dir,
+                cursor_project_slug(mixed_nested),
+                None,
+                "mixed-nested",
+            )
+
+            nested_digests = harvest_cursor(
+                projects_dir,
+                scope="invoked",
+                invoked_project=os.path.join(nested, "src"),
+            )
+            fallback_digests = harvest_cursor(
+                projects_dir,
+                scope="invoked",
+                invoked_project=fallback,
+            )
+            metadata_free_digests = harvest_cursor(
+                projects_dir,
+                scope="invoked",
+                invoked_project=os.path.join(metadata_free, "packages", "app"),
+            )
+            mixed_digests = harvest_cursor(
+                projects_dir,
+                scope="invoked",
+                invoked_project=mixed_nested,
+            )
+
+        self.assertEqual([digest.session_id for digest in nested_digests], ["nested"])
+        self.assertEqual(nested_digests[0].project, nested)
+        self.assertEqual([digest.session_id for digest in fallback_digests], ["fallback"])
+        self.assertEqual(fallback_digests[0].project, fallback)
+        self.assertEqual(
+            [digest.session_id for digest in metadata_free_digests],
+            ["metadata-free"],
+        )
+        self.assertEqual(metadata_free_digests[0].project, metadata_free)
+        self.assertEqual([digest.session_id for digest in mixed_digests], ["mixed-nested"])
+        self.assertEqual(mixed_digests[0].project, mixed_nested)
+
+    def test_harvest_cursor_uses_numeric_mtime_for_aware_and_local_cutoffs(self):
+        from datetime import datetime, timedelta, timezone
+
+        from skillopt_sleep.harvest_cursor import cursor_project_slug, harvest_cursor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = os.path.join(tmp, "project")
+            project_dir = os.path.join(tmp, ".cursor", "projects", cursor_project_slug(project))
+            os.makedirs(project_dir)
+            with open(os.path.join(project_dir, ".workspace-trusted"), "w", encoding="utf-8") as f:
+                json.dump({"workspacePath": project}, f)
+
+            cutoff = 1_700_000_000
+            for session_id, modified in (("before", cutoff - 1), ("equal", cutoff), ("after", cutoff + 1)):
+                path = os.path.join(
+                    project_dir,
+                    "agent-transcripts",
+                    session_id,
+                    f"{session_id}.jsonl",
+                )
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                self._write_jsonl(path, [
+                    {"role": "user", "message": {"content": f"task {session_id}"}},
+                    {"role": "assistant", "message": {"content": "done"}},
+                ])
+                os.utime(path, (modified, modified))
+
+            aware = datetime.fromtimestamp(cutoff, timezone(timedelta(hours=5))).isoformat()
+            local = datetime.fromtimestamp(cutoff).replace(microsecond=0).isoformat()
+            aware_result = harvest_cursor(projects_dir=os.path.dirname(project_dir), since_iso=aware)
+            local_result = harvest_cursor(projects_dir=os.path.dirname(project_dir), since_iso=local)
+
+        self.assertEqual([digest.session_id for digest in aware_result], ["after"])
+        self.assertEqual([digest.session_id for digest in local_result], ["after"])
+
+    def test_harvest_cursor_filters_only_exact_internal_replay_sentinel(self):
+        from skillopt_sleep.harvest_cursor import CURSOR_REPLAY_SENTINEL, cursor_project_slug, harvest_cursor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = os.path.join(tmp, "project")
+            project_dir = os.path.join(tmp, ".cursor", "projects", cursor_project_slug(project))
+            for session_id, prompt in (
+                ("internal", CURSOR_REPLAY_SENTINEL + "\nrun replay"),
+                ("real", f"Please explain what {CURSOR_REPLAY_SENTINEL} means"),
+                ("grader", "You are a strict grader helping me review this response"),
+                ("skill", "Please explain the ## CURRENT SKILL section"),
+            ):
+                path = os.path.join(project_dir, "agent-transcripts", session_id, f"{session_id}.jsonl")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                self._write_jsonl(path, [
+                    {"role": "user", "message": {"content": prompt}},
+                    {"role": "assistant", "message": {"content": "answer"}},
+                ])
+
+            digests = harvest_cursor(os.path.join(tmp, ".cursor", "projects"), scope="all")
+
+        self.assertEqual(
+            sorted(digest.session_id for digest in digests),
+            ["grader", "real", "skill"],
+        )
+
+    def test_auto_source_keeps_existing_codex_then_claude_precedence(self):
+        from skillopt_sleep.harvest_sources import harvest_for_config
+
+        cfg = load_config(transcript_source="auto", invoked_project="/repo/project")
+        expected = [SessionDigest(session_id="claude-session", project="/repo/project")]
+        with mock.patch("skillopt_sleep.harvest_sources.harvest_codex", return_value=[]), \
+             mock.patch("skillopt_sleep.harvest_sources.harvest", return_value=expected), \
+             mock.patch("skillopt_sleep.harvest_sources.harvest_cursor") as cursor_harvest:
+            self.assertEqual(harvest_for_config(cfg), expected)
+
+        cursor_harvest.assert_not_called()
+
     def test_harvest_codex_filters_project_and_cli_source(self):
         from skillopt_sleep.__main__ import _cfg_from_args
         from skillopt_sleep.harvest_sources import harvest_for_config
@@ -199,6 +554,7 @@ class TestHarvest(unittest.TestCase):
                 "max_sessions": 5,
                 "max_tasks": 3,
                 "target_skill_path": ".agents/skills/taste-skill/SKILL.md",
+                "preferences": "Always use async/await",
                 "progress": True,
                 "auto_adopt": False,
             })
@@ -206,12 +562,13 @@ class TestHarvest(unittest.TestCase):
             cfg = _cfg_from_args(Args())
 
             self.assertEqual(cfg.get("backend"), "codex")
+            self.assertEqual(cfg.get("preferences"), "Always use async/await")
             self.assertEqual(cfg.get("max_sessions_per_night"), 5)
             self.assertEqual(cfg.get("max_tasks_per_night"), 3)
             self.assertTrue(cfg.get("progress"))
             self.assertEqual(
                 cfg.managed_skill_path(),
-                os.path.join(project, ".agents/skills/taste-skill/SKILL.md"),
+                os.path.abspath(os.path.join(project, ".agents/skills/taste-skill/SKILL.md")),
             )
 
     def test_cli_report_payload_includes_rejected_edits(self):
@@ -281,7 +638,7 @@ class TestHarvest(unittest.TestCase):
 
         self.assertEqual(
             cfg.managed_skill_path(),
-            "/repo/Yoshi/.agents/skills/yoshi-monorepo/SKILL.md",
+            os.path.abspath("/repo/Yoshi/.agents/skills/yoshi-monorepo/SKILL.md"),
         )
 
     def test_cmd_run_uses_tasks_file_without_harvest(self):
@@ -476,6 +833,18 @@ Resolve local Git conflicts.
             "resolve a local Git conflict",
         })
 
+    def test_cursor_miner_failure_is_not_swallowed(self):
+        from skillopt_sleep.backend import CursorBackendError
+
+        def failed_miner(_digests):
+            raise CursorBackendError("Cursor Agent authentication failed")
+
+        with self.assertRaises(CursorBackendError):
+            mine(
+                [self._digest(["configure an MCP server"], ["neg:failed"])],
+                llm_miner=failed_miner,
+            )
+
 
 class TestConsolidateGate(unittest.TestCase):
     def test_accepts_helpful_rejects_harmful(self):
@@ -573,8 +942,30 @@ class TestLlmMiner(unittest.TestCase):
         miner = make_llm_miner(StubBackend())
         tasks = miner([digest])
         self.assertEqual(len(tasks), 1)
+        # A shape-only judge plus a rubric now grades on outcome, not on the
+        # presence of a heading an optimizer can simply add.
+        self.assertEqual(tasks[0].reference_kind, "rubric")
+        self.assertEqual(tasks[0].reference, "has a risks section")
+
+    def test_miner_keeps_rule_judge_when_no_rubric_offered(self):
+        from skillopt_sleep.backend import Backend
+        from skillopt_sleep.llm_miner import make_llm_miner
+
+        class StubBackend(Backend):
+            name = "stub"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                return ('[{"intent":"write a research brief",'
+                        '"checks":[{"op":"contains","arg":"risk"}],'
+                        '"rubric":"","satisfied":false}]')
+
+        digest = SessionDigest(session_id="s1", project="/p",
+                               user_prompts=["write a brief on X"],
+                               assistant_finals=["a brief"], n_user_turns=1)
+        tasks = make_llm_miner(StubBackend())([digest])
+        self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].reference_kind, "rule")
-        self.assertEqual(tasks[0].judge["checks"][0]["op"], "section_present")
+        self.assertEqual(tasks[0].judge["checks"][0]["op"], "contains")
 
     def test_miner_drops_uncheckable(self):
         from skillopt_sleep.backend import Backend
@@ -767,6 +1158,60 @@ class TestCodexBackend(unittest.TestCase):
         self.assertIn("exited 1", be.last_call_error)  # failure surfaced for diagnostics
         self.assertEqual(called, [])                   # no tool actually ran
 
+    def test_codex_resolve_path_windows(self):
+        from skillopt_sleep.backend import resolve_codex_path
+        with mock.patch("sys.platform", "win32"), \
+             mock.patch("shutil.which", return_value=None), \
+             mock.patch.dict("os.environ", {
+                 "APPDATA": r"C:\Users\Sparsh\AppData\Roaming",
+                 "USERPROFILE": r"C:\Users\Sparsh",
+                 "NVM_HOME": r"C:\Users\Sparsh\nvm"
+             }), \
+             mock.patch("os.path.exists", return_value=True):
+            path = resolve_codex_path("")
+            self.assertEqual(path, r"C:\Users\Sparsh\AppData\Roaming\npm\codex.cmd")
+
+    def test_codex_attempt_with_tools_windows(self):
+        from skillopt_sleep.backend import CodexCliBackend
+        be = CodexCliBackend(codex_path="codex")
+        task = TaskRecord(id="t", project="/p", intent="answer the question",
+                          reference_kind="rule",
+                          judge={"checks": [{"op": "tool_called", "arg": "search"}]})
+        calls = []
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Proc()
+
+        with mock.patch("os.name", "nt"), \
+             mock.patch("shutil.rmtree"), \
+             mock.patch("skillopt_sleep.backend.subprocess.run", side_effect=fake_run):
+            orig_mkdtemp = tempfile.mkdtemp
+            temp_dirs = []
+            def fake_mkdtemp(*args, **kwargs):
+                d = orig_mkdtemp(*args, **kwargs)
+                temp_dirs.append(d)
+                return d
+            with mock.patch("tempfile.mkdtemp", side_effect=fake_mkdtemp):
+                be.attempt_with_tools(task, "", "", ["search"])
+            
+            self.assertEqual(len(temp_dirs), 1)
+            work_dir = temp_dirs[0]
+            shim_path = os.path.join(work_dir, "search.cmd")
+            try:
+                self.assertTrue(os.path.exists(shim_path))
+                with open(shim_path, "r") as f:
+                    content = f.read()
+                self.assertIn("@echo off", content)
+                self.assertIn("%~n0", content)
+            finally:
+                import shutil
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+
 
 class TestMultiRolloutAndBudget(unittest.TestCase):
     def test_rolloutset_stats(self):
@@ -912,7 +1357,7 @@ class TestFullCycleAndAdopt(unittest.TestCase):
 
     def test_cycle_can_target_repo_scoped_skill_path(self):
         with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
-            target = os.path.join(proj, ".agents/skills/taste-skill/SKILL.md")
+            target = os.path.abspath(os.path.join(proj, ".agents/skills/taste-skill/SKILL.md"))
             cfg = load_config(
                 invoked_project=proj,
                 projects="invoked",
@@ -1057,6 +1502,412 @@ class TestCopilotBackend(unittest.TestCase):
             shutil.rmtree(stub_dir, ignore_errors=True)
 
 
+class TestCursorBackend(unittest.TestCase):
+    """Pure-logic tests for CursorCliBackend without a Cursor login."""
+
+    def test_alias_and_environment_resolution(self):
+        from skillopt_sleep.backend import CursorCliBackend, get_backend, resolve_cursor_path
+
+        for name in ("cursor", "cursor_agent", "cursor_cli"):
+            self.assertIsInstance(get_backend(name), CursorCliBackend, name)
+        with mock.patch.dict(os.environ, {
+            "SKILLOPT_SLEEP_CURSOR_PATH": "/tmp/cursor-agent",
+            "SKILLOPT_SLEEP_CURSOR_MODEL": "cursor-small",
+        }, clear=False):
+            self.assertEqual(resolve_cursor_path(), "/tmp/cursor-agent")
+            self.assertEqual(CursorCliBackend().model, "cursor-small")
+
+    def test_cursor_path_overrides_expand_user_home(self):
+        from skillopt_sleep.__main__ import _cfg_from_args
+        from skillopt_sleep.backend import resolve_cursor_path
+
+        Args = type("Args", (), {
+            "project": "",
+            "scope": "",
+            "backend": "",
+            "model": "",
+            "codex_path": "",
+            "cursor_path": "~/.local/bin/cursor-agent",
+            "claude_home": "",
+            "codex_home": "",
+            "cursor_home": "~/.cursor-custom",
+            "source": "",
+            "lookback_hours": None,
+            "edit_budget": 0,
+            "max_sessions": 0,
+            "max_tasks": 0,
+            "target_skill_path": "",
+            "preferences": "",
+            "progress": False,
+            "auto_adopt": False,
+        })
+
+        cfg = _cfg_from_args(Args())
+        self.assertEqual(
+            cfg.get("cursor_path"),
+            os.path.abspath(os.path.expanduser("~/.local/bin/cursor-agent")),
+        )
+        self.assertEqual(
+            cfg.cursor_projects_dir,
+            os.path.join(os.path.expanduser("~/.cursor-custom"), "projects"),
+        )
+
+        direct_cfg = load_config(
+            cursor_home="~/.cursor-config",
+            cursor_path="~/.cursor-config/bin/cursor-agent",
+        )
+        self.assertEqual(
+            direct_cfg.cursor_projects_dir,
+            os.path.join(os.path.expanduser("~/.cursor-config"), "projects"),
+        )
+        self.assertEqual(
+            resolve_cursor_path(direct_cfg.get("cursor_path")),
+            os.path.expanduser("~/.cursor-config/bin/cursor-agent"),
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"SKILLOPT_SLEEP_CURSOR_PATH": "~/.cursor-env/bin/cursor-agent"},
+            clear=False,
+        ):
+            self.assertEqual(
+                resolve_cursor_path(),
+                os.path.expanduser("~/.cursor-env/bin/cursor-agent"),
+            )
+
+    def test_read_only_call_uses_stdin_ask_mode_and_terminal_result(self):
+        from skillopt_sleep.backend import CursorCliBackend
+        from skillopt_sleep.harvest_cursor import CURSOR_REPLAY_SENTINEL
+
+        calls = []
+        runtime_configs = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            config_dir = kwargs["env"]["CURSOR_CONFIG_DIR"]
+            data_dir = kwargs["env"]["CURSOR_DATA_DIR"]
+            with open(os.path.join(config_dir, "cli-config.json"), encoding="utf-8") as f:
+                runtime_configs.append(json.load(f))
+            self.assertTrue(os.path.isdir(data_dir))
+
+            class Proc:
+                returncode = 0
+                stdout = (
+                    '{"type":"message","result":"intermediate"}\n'
+                    '{"type":"result","subtype":"success","is_error":false,'
+                    '"result":"final answer"}\n'
+                )
+                stderr = ""
+
+            return Proc()
+
+        backend = CursorCliBackend(cursor_path="cursor-agent-test", model="cursor-model")
+        with mock.patch("skillopt_sleep.backend.subprocess.run", side_effect=fake_run):
+            self.assertEqual(backend._call("solve this"), "final answer")
+
+        cmd, kwargs = calls[0]
+        self.assertEqual(cmd[0], "cursor-agent-test")
+        self.assertIn("-p", cmd)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "json")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "ask")
+        self.assertIn("--trust", cmd)
+        self.assertEqual(cmd[cmd.index("--workspace") + 1], kwargs["cwd"])
+        self.assertTrue(os.path.basename(kwargs["cwd"]).startswith("skillopt_sleep_cursor_"))
+        self.assertNotIn("--force", cmd)
+        self.assertNotIn("--sandbox", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "cursor-model")
+        self.assertTrue(kwargs["input"].startswith(CURSOR_REPLAY_SENTINEL + "\n\n"))
+        self.assertTrue(kwargs["input"].endswith("solve this"))
+        self.assertNotEqual(kwargs["env"]["CURSOR_CONFIG_DIR"], os.path.expanduser("~/.cursor"))
+        self.assertEqual(runtime_configs[0]["approvalMode"], "allowlist")
+        self.assertEqual(runtime_configs[0]["permissions"]["allow"], [])
+        self.assertEqual(
+            runtime_configs[0]["permissions"]["deny"],
+            ["Read(**)", "Write(**)", "Mcp(*:*)"],
+        )
+        self.assertEqual(runtime_configs[0]["sandbox"]["mode"], "disabled")
+        self.assertFalse(os.path.exists(os.path.dirname(kwargs["env"]["CURSOR_CONFIG_DIR"])))
+        self.assertEqual(backend.last_call_error, "")
+        self.assertEqual(
+            CursorCliBackend._parse_json_response('{"type":"message","result":"not terminal"}'),
+            "",
+        )
+
+    def test_cursor_environment_keeps_runtime_auth_and_drops_unrelated_secrets(self):
+        from skillopt_sleep.backend import CursorCliBackend
+
+        host_env = {
+            "PATH": "/usr/bin",
+            "LANG": "en_US.UTF-8",
+            "CURSOR_API_KEY": "cursor-auth",
+            "HTTPS_PROXY": "https://proxy.example",
+            "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            "OPENAI_API_KEY": "openai-secret",
+            "ANTHROPIC_API_KEY": "anthropic-secret",
+            "GITHUB_TOKEN": "github-secret",
+        }
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            with mock.patch.dict(os.environ, host_env, clear=True):
+                env = CursorCliBackend._isolated_environment(runtime_dir)
+
+            self.assertEqual(env["PATH"], "/usr/bin")
+            self.assertEqual(env["LANG"], "en_US.UTF-8")
+            self.assertEqual(env["CURSOR_API_KEY"], "cursor-auth")
+            self.assertEqual(env["HTTPS_PROXY"], "https://proxy.example")
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertNotIn("ANTHROPIC_API_KEY", env)
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertTrue(env["CURSOR_CONFIG_DIR"].startswith(runtime_dir))
+            self.assertTrue(env["CURSOR_DATA_DIR"].startswith(runtime_dir))
+
+    def test_nonzero_and_error_results_fail_once_with_redacted_diagnostics(self):
+        from skillopt_sleep.backend import CursorBackendError, CursorCliBackend
+
+        backend = CursorCliBackend(cursor_path="cursor-agent-test", timeout=7)
+
+        class BadProc:
+            returncode = 9
+            stdout = "not-json"
+            stderr = "Authorization: Bearer cursor-secret-value"
+
+        with mock.patch("skillopt_sleep.backend.subprocess.run", return_value=BadProc()) as run:
+            with self.assertRaises(CursorBackendError):
+                backend._call("solve this")
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("exited 9", backend.last_call_error)
+        self.assertIn("[REDACTED]", backend.last_call_error)
+        self.assertNotIn("cursor-secret-value", backend.last_call_error)
+
+        class ErrorProc:
+            returncode = 0
+            stdout = '{"type":"result","is_error":true,"result":"api_key=cursor-secret"}'
+            stderr = ""
+
+        with mock.patch("skillopt_sleep.backend.subprocess.run", return_value=ErrorProc()) as run:
+            with self.assertRaises(CursorBackendError):
+                backend._call("solve this")
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("error result", backend.last_call_error)
+        self.assertIn("[REDACTED]", backend.last_call_error)
+        self.assertNotIn("cursor-secret", backend.last_call_error)
+
+        with mock.patch(
+            "skillopt_sleep.backend.subprocess.run",
+            side_effect=OSError("missing cursor-agent"),
+        ) as run:
+            with self.assertRaises(CursorBackendError):
+                backend._call("solve this")
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("spawn failed", backend.last_call_error)
+
+    def test_read_only_timeout_and_malformed_output_retry_once(self):
+        import subprocess
+
+        from skillopt_sleep.backend import CursorBackendError, CursorCliBackend
+
+        backend = CursorCliBackend(cursor_path="cursor-agent-test", timeout=7)
+
+        class GoodProc:
+            returncode = 0
+            stdout = '{"type":"result","is_error":false,"result":"recovered"}'
+            stderr = ""
+
+        with mock.patch(
+            "skillopt_sleep.backend.subprocess.run",
+            side_effect=[subprocess.TimeoutExpired(["cursor-agent-test"], 7), GoodProc()],
+        ) as run:
+            self.assertEqual(backend._call("solve this"), "recovered")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(backend.last_call_error, "")
+
+        class MalformedProc:
+            returncode = 0
+            stdout = "still not json"
+            stderr = ""
+
+        with mock.patch("skillopt_sleep.backend.subprocess.run", return_value=MalformedProc()) as run:
+            with self.assertRaises(CursorBackendError):
+                backend._call("solve this")
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("no usable JSON response", backend.last_call_error)
+
+        class AuthProc:
+            returncode = 0
+            stdout = ""
+            stderr = "Not authenticated. Please log in with token=cursor-secret"
+
+        with mock.patch("skillopt_sleep.backend.subprocess.run", return_value=AuthProc()) as run:
+            with self.assertRaises(CursorBackendError):
+                backend._call("solve this")
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("authentication failed", backend.last_call_error)
+        self.assertNotIn("cursor-secret", backend.last_call_error)
+
+        class ConfigProc:
+            returncode = 0
+            stdout = ""
+            stderr = "Unsupported model: cursor-unknown"
+
+        with mock.patch("skillopt_sleep.backend.subprocess.run", return_value=ConfigProc()) as run:
+            with self.assertRaises(CursorBackendError):
+                backend._call("solve this")
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("configuration failed", backend.last_call_error)
+
+    def test_failed_cursor_call_is_not_cached(self):
+        from skillopt_sleep.backend import CursorBackendError, CursorCliBackend
+
+        class BadProc:
+            returncode = 1
+            stdout = ""
+            stderr = "not authenticated"
+
+        class GoodProc:
+            returncode = 0
+            stdout = '{"type":"result","is_error":false,"result":"answer"}'
+            stderr = ""
+
+        backend = CursorCliBackend(cursor_path="cursor-agent-test")
+        task = TaskRecord(id="cache", project="/p", intent="answer this")
+        with mock.patch(
+            "skillopt_sleep.backend.subprocess.run",
+            side_effect=[BadProc(), GoodProc()],
+        ) as run:
+            with self.assertRaises(CursorBackendError):
+                backend.attempt(task, skill="", memory="")
+            self.assertEqual(backend.attempt(task, skill="", memory=""), "answer")
+            self.assertEqual(backend.attempt(task, skill="", memory=""), "answer")
+
+        self.assertEqual(run.call_count, 2)
+
+    def test_tool_aware_replay_fails_before_cursor_subprocess(self):
+        from skillopt_sleep.backend import CursorBackendError, CursorCliBackend
+
+        backend = CursorCliBackend(cursor_path="cursor-agent-test")
+        task = TaskRecord(id="cursor-tools", project="/p", intent="search")
+        with mock.patch("skillopt_sleep.backend.subprocess.run") as run:
+            with self.assertRaisesRegex(
+                CursorBackendError,
+                "Cursor tool-aware replay is temporarily disabled",
+            ):
+                backend.attempt_with_tools(task, skill="", memory="", tools=["search"])
+        run.assert_not_called()
+        self.assertIn("temporarily disabled", backend.last_call_error)
+        self.assertEqual(backend._cache, {})
+
+    def test_tool_aware_cli_run_fails_without_writes_or_checkpoint(self):
+        import contextlib
+        import io
+
+        from skillopt_sleep.__main__ import main
+        from skillopt_sleep.backend import CursorCliBackend
+        from skillopt_sleep.tasks_file import make_tasks_payload, write_tasks_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = os.path.join(tmp, "project")
+            claude_home = os.path.join(tmp, ".claude")
+            target = os.path.join(
+                project,
+                ".cursor",
+                "skills",
+                "skillopt-sleep-learned",
+                "SKILL.md",
+            )
+            os.makedirs(project)
+            task = TaskRecord(
+                id="cursor-tool-task",
+                project=project,
+                intent="Search before answering",
+                reference_kind="rule",
+                judge={"checks": [{"op": "tool_called", "arg": "search"}]},
+                split="val",
+            )
+            payload = make_tasks_payload(
+                [task],
+                project=project,
+                transcript_source="cursor",
+                target_skill_path=target,
+            )
+            payload["reviewed"] = True
+            tasks_path = write_tasks_file(os.path.join(tmp, "tasks.json"), payload)
+            backend = CursorCliBackend(cursor_path="cursor-agent-test")
+            stderr = io.StringIO()
+
+            with mock.patch(
+                "skillopt_sleep.cycle.build_backend",
+                return_value=backend,
+            ):
+                with mock.patch("skillopt_sleep.backend.subprocess.run") as run:
+                    with contextlib.redirect_stderr(stderr):
+                        rc = main([
+                            "run",
+                            "--project", project,
+                            "--claude-home", claude_home,
+                            "--backend", "cursor",
+                            "--tasks-file", tasks_path,
+                            "--target-skill-path", target,
+                            "--auto-adopt",
+                        ])
+
+            self.assertEqual(rc, 1)
+            self.assertIn("Cursor tool-aware replay is temporarily disabled", stderr.getvalue())
+            run.assert_not_called()
+            self.assertEqual(backend._cache, {})
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".skillopt-sleep")))
+            self.assertFalse(os.path.exists(os.path.join(project, ".skillopt-sleep")))
+            self.assertFalse(os.path.exists(target))
+
+    def test_cursor_failure_aborts_without_state_or_staging_and_cli_returns_nonzero(self):
+        import contextlib
+        import io
+
+        from skillopt_sleep.__main__ import main
+        from skillopt_sleep.backend import CursorBackendError, CursorCliBackend
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = os.path.join(tmp, "project")
+            os.makedirs(project)
+            cfg = load_config(
+                backend="cursor",
+                invoked_project=project,
+                projects="invoked",
+                claude_home=os.path.join(tmp, ".claude"),
+                target_skill_path=".cursor/skills/skillopt-sleep-learned/SKILL.md",
+            )
+            backend = CursorCliBackend(cursor_path="cursor-agent-test")
+            task = TaskRecord(
+                id="failure",
+                project=project,
+                intent="answer this",
+                reference_kind="exact",
+                reference="answer",
+                split="val",
+            )
+            with mock.patch.object(
+                backend,
+                "_call",
+                side_effect=CursorBackendError("Cursor Agent exited 1: token [REDACTED]"),
+            ):
+                with self.assertRaises(CursorBackendError):
+                    run_sleep_cycle(cfg, seed_tasks=[task], backend=backend)
+
+            self.assertFalse(os.path.exists(cfg.state_path))
+            self.assertFalse(os.path.exists(os.path.join(project, ".skillopt-sleep")))
+            self.assertFalse(os.path.exists(cfg.managed_skill_path()))
+
+            stderr = io.StringIO()
+            with mock.patch(
+                "skillopt_sleep.__main__.run_sleep_cycle",
+                side_effect=CursorBackendError("Cursor Agent exited 1: token=cursor-secret"),
+            ), contextlib.redirect_stderr(stderr):
+                rc = main(["dry-run", "--project", project, "--backend", "cursor"])
+
+        self.assertEqual(rc, 1)
+        self.assertIn("Cursor backend failed", stderr.getvalue())
+        self.assertIn("[REDACTED]", stderr.getvalue())
+        self.assertNotIn("cursor-secret", stderr.getvalue())
+
+
 class TestClaudeCliBackendBare(unittest.TestCase):
     """Issue #68: --bare must be conditional on ANTHROPIC_API_KEY."""
 
@@ -1118,6 +1969,36 @@ class TestClaudeCliBackendBare(unittest.TestCase):
         # But it's also recorded for detection
         self.assertIn("Not logged in", getattr(be, "last_call_error", ""))
 
+    def test_spawn_failure_sets_last_call_error(self):
+        """When subprocess.run raises FileNotFoundError, _call must set
+        last_call_error and log a warning instead of silently returning ''."""
+        from skillopt_sleep.backend import ClaudeCliBackend
+        be = ClaudeCliBackend(
+            claude_path="/nonexistent/claude-binary",
+            timeout=3,
+        )
+        result = be._call("test prompt")
+        self.assertEqual(result, "")
+        self.assertIn("Claude CLI spawn failed", be.last_call_error)
+
+    def test_attempt_tools_spawn_failure_sets_last_call_error(self):
+        """When subprocess.run raises in attempt_with_tools, last_call_error
+        must be set and a warning logged."""
+        from skillopt_sleep.backend import ClaudeCliBackend
+        from skillopt_sleep.types import TaskRecord
+        be = ClaudeCliBackend(
+            claude_path="/nonexistent/claude-binary",
+            timeout=3,
+        )
+        task = TaskRecord(
+            id="t1", project="/p", intent="test",
+            reference="ref", reference_kind="exact",
+            tags=[], split="train",
+        )
+        resp, called = be.attempt_with_tools(task, "", "", tools=["search"])
+        self.assertEqual(resp, "")
+        self.assertIn("Claude CLI spawn failed", be.last_call_error)
+
 
 
 
@@ -1147,6 +2028,71 @@ class MockRewardHackingBackend(MockBackend):
                 break
         return edits
 
+class MockBeneficialBackend(MockBackend):
+    def attempt(self, task: TaskRecord, skill: str, memory: str, sample_id: int = 0) -> str:
+        ctx = (skill or "") + "\n" + (memory or "")
+        # If the beneficial artifact is present:
+        if "Always think step-by-step" in ctx:
+            if "rule:__beneficial__" in task.tags:
+                return str(task.reference) # improves the train task
+            if "rule:real" in task.tags:
+                return str(task.reference) # improves the real held-out task
+                
+        # Baseline behavior (without the rule)
+        if "rule:__beneficial__" in task.tags:
+            return "I am missing input" # baseline fails the train task
+        if "rule:real" in task.tags:
+            return "baseline fails too" # baseline fails the real task
+            
+        return super().attempt(task, skill, memory, sample_id)
+
+    def reflect(self, failures, successes, skill, memory, **kwargs):
+        edits = []
+        for task, _ in failures:
+            if "rule:__beneficial__" in task.tags:
+                edits.append(EditRecord("skill", "add", "Always think step-by-step", rationale="beneficial"))
+                break
+        return edits
+
+
+class MockFractionalDegradationBackend(MockBackend):
+    """Backend where an edit improves train but partially degrades held-out.
+
+    Train improves 0.0 → 1.0 (looks good!) but held-out degrades from
+    1.0 → 0.5 across two val tasks (one still passes, one breaks).
+    A naive optimizer might see the train improvement and miss the
+    partial regression — the gate must catch this subtle case.
+    """
+
+    HACK_TEXT = "Always respond with a definitive answer"
+
+    def attempt(self, task: TaskRecord, skill: str, memory: str, sample_id: int = 0) -> str:
+        ctx = (skill or "") + "\n" + (memory or "")
+        if self.HACK_TEXT in ctx:
+            if "rule:__reward_hacking__" in task.tags:
+                return str(task.reference)  # train improves
+            if "rule:real" in task.tags:
+                if task.id == "v1":
+                    return str(task.reference)  # val task 1 still passes
+                if task.id == "v2":
+                    return "misleading answer"  # val task 2 breaks
+        # Baseline (without edit)
+        if "rule:__reward_hacking__" in task.tags:
+            return "I am missing input"  # train fails
+        if "rule:real" in task.tags:
+            return str(task.reference)  # held-out passes
+        return super().attempt(task, skill, memory, sample_id)
+
+    def reflect(self, failures, successes, skill, memory, **kwargs):
+        edits = []
+        for task, _ in failures:
+            if "rule:__reward_hacking__" in task.tags:
+                edits.append(EditRecord("skill", "add", self.HACK_TEXT,
+                                        rationale="improve response confidence"))
+                break
+        return edits
+
+
 class TestVerifierDiscipline(unittest.TestCase):
     def test_gate_rejects_reward_hacking_edit(self):
         be = MockRewardHackingBackend()
@@ -1157,8 +2103,60 @@ class TestVerifierDiscipline(unittest.TestCase):
         res = consolidate(be, tasks, "", "", edit_budget=4, gate_metric="hard", night=1)
         
         self.assertFalse(res.accepted)
+        self.assertEqual(res.gate_action, "reject")
+        self.assertEqual(res.holdout_baseline, 1.0)
+        self.assertEqual(res.holdout_candidate, 1.0) # final state reverts to baseline
         self.assertGreater(len(res.rejected_edits), 0)
         self.assertIn("placeholder", res.rejected_edits[0].content)
+
+    def test_gate_accepts_beneficial_edit(self):
+        be = MockBeneficialBackend()
+        train_task = TaskRecord(id="t2", project="/p", intent="train", reference="ABCDEF", reference_kind="exact", tags=["rule:__beneficial__"], split="train")
+        val_task = TaskRecord(id="v2", project="/p", intent="val", reference="UVWXYZ", reference_kind="exact", tags=["rule:real"], split="val")
+        tasks = [train_task, val_task]
+
+        res = consolidate(be, tasks, "", "", edit_budget=4, gate_metric="hard", night=1)
+        
+        self.assertTrue(res.accepted)
+        self.assertEqual(res.gate_action, "accept_new_best")
+        self.assertEqual(res.holdout_baseline, 0.0)
+        self.assertEqual(res.holdout_candidate, 1.0)
+        self.assertGreater(len(res.applied_edits), 0)
+        self.assertIn("step-by-step", res.applied_edits[0].content)
+
+    def test_gate_rejects_fractional_degradation(self):
+        """Gate must reject an edit that partially degrades held-out (1.0→0.5),
+        not just all-or-nothing collapses. Train improves (0.0→1.0) which makes
+        the regression easy to miss — the gate catches it anyway."""
+        from skillopt_sleep.replay import aggregate_scores, replay_batch
+
+        be = MockFractionalDegradationBackend()
+        train = TaskRecord(id="t3", project="/p", intent="train", reference="ABC",
+                           reference_kind="exact", tags=["rule:__reward_hacking__"], split="train")
+        val1 = TaskRecord(id="v1", project="/p", intent="val", reference="DEF",
+                          reference_kind="exact", tags=["rule:real"], split="val")
+        val2 = TaskRecord(id="v2", project="/p", intent="val", reference="GHI",
+                          reference_kind="exact", tags=["rule:real"], split="val")
+        tasks = [train, val1, val2]
+
+        candidate_pairs = replay_batch(be, [val1, val2], be.HACK_TEXT, "")
+        candidate_hard, _candidate_soft = aggregate_scores(candidate_pairs)
+        self.assertEqual([result.hard for _task, result in candidate_pairs], [1.0, 0.0])
+        self.assertEqual(candidate_hard, 0.5)
+
+        res = consolidate(be, tasks, "", "", edit_budget=4, gate_metric="hard", night=1)
+
+        self.assertFalse(res.accepted)
+        self.assertEqual(res.gate_action, "reject")
+        # Baseline: both val tasks pass → 1.0
+        self.assertEqual(res.holdout_baseline, 1.0)
+        # After rejection the skill reverts; final replay also passes both
+        self.assertEqual(res.holdout_candidate, 1.0)
+        # Confirm we had two val tasks in the baseline
+        self.assertEqual(len(res.holdout_detail), 2)
+        self.assertGreater(len(res.rejected_edits), 0)
+        self.assertIn("definitive answer", res.rejected_edits[0].content)
+
 
 class TestDiagnosticsRedaction(unittest.TestCase):
     """diagnostics.json surfaces backend stderr / optimizer replies / task
@@ -1280,6 +2278,101 @@ class TestDiagnosticsRedaction(unittest.TestCase):
         joined = "\n".join(cm.output)
         self.assertNotIn(secret, joined, "raw token leaked into the log line")
         self.assertIn("REDACTED", joined)
+
+
+class TestGroupTasksBySkillHint(unittest.TestCase):
+    MANAGED = "managed-skill"
+
+    def _task(self, tid, hint="", session="s1", outcome="unknown"):
+        return TaskRecord(
+            id=tid, project="/repo/example", intent="intent " + tid,
+            skill_hint=hint, source_sessions=[session], outcome=outcome,
+        )
+
+    def _ids(self, groups):
+        return {name: [t.id for t in tasks] for name, tasks in groups.items()}
+
+    def test_group_tasks_by_skill_hint_empty_input(self):
+        self.assertEqual(group_tasks_by_skill_hint([], self.MANAGED), {})
+
+    def test_group_tasks_by_skill_hint_legacy_tasks_go_to_managed_skill(self):
+        groups = group_tasks_by_skill_hint(
+            [self._task("t1"), self._task("t2")], self.MANAGED
+        )
+        self.assertEqual(self._ids(groups), {self.MANAGED: ["t1", "t2"]})
+
+    def test_group_tasks_by_skill_hint_blank_hint_goes_to_managed_skill(self):
+        groups = group_tasks_by_skill_hint([self._task("t1", "   ")], self.MANAGED)
+        self.assertEqual(self._ids(groups), {self.MANAGED: ["t1"]})
+        self.assertEqual(groups[self.MANAGED][0].skill_hint, "")
+
+    def test_group_tasks_by_skill_hint_preserves_first_seen_order(self):
+        groups = group_tasks_by_skill_hint(
+            [
+                self._task("t1", "alpha"),
+                self._task("t2", "beta"),
+                self._task("t3", "alpha"),
+                self._task("t4"),
+            ],
+            self.MANAGED,
+        )
+        self.assertEqual(list(groups), ["alpha", "beta", self.MANAGED])
+        self.assertEqual(
+            self._ids(groups),
+            {"alpha": ["t1", "t3"], "beta": ["t2"], self.MANAGED: ["t4"]},
+        )
+
+    def test_group_tasks_by_skill_hint_merges_duplicate_ids_once(self):
+        first = self._task("t1", "alpha", session="s1")
+        duplicate = self._task("t1", "alpha", session="s2", outcome="success")
+        groups = group_tasks_by_skill_hint(
+            [
+                first,
+                self._task("t2", "beta"),
+                duplicate,
+            ],
+            self.MANAGED,
+        )
+        self.assertEqual(self._ids(groups), {"alpha": ["t1"], "beta": ["t2"]})
+        merged = groups["alpha"][0]
+        self.assertEqual(merged.source_sessions, ["s1", "s2"])
+        self.assertEqual(merged.outcome, "success")
+        self.assertIsNot(merged, first)
+        self.assertEqual(first.source_sessions, ["s1"])
+        self.assertEqual(first.outcome, "unknown")
+        self.assertEqual(duplicate.source_sessions, ["s2"])
+
+    def test_group_tasks_by_skill_hint_normalizes_without_mutating_inputs(self):
+        first = self._task("t1", " alpha ", session="s1")
+        duplicate = self._task("t1", "alpha", session="s2")
+
+        groups = group_tasks_by_skill_hint([first, duplicate], self.MANAGED)
+
+        self.assertEqual(self._ids(groups), {"alpha": ["t1"]})
+        self.assertEqual(groups["alpha"][0].skill_hint, "alpha")
+        self.assertEqual(first.skill_hint, " alpha ")
+        self.assertEqual(duplicate.skill_hint, "alpha")
+
+    def test_group_tasks_by_skill_hint_conflicting_hints_go_to_managed_skill(self):
+        groups = group_tasks_by_skill_hint(
+            [self._task("t1", "alpha"), self._task("t1", "beta", session="s2")],
+            self.MANAGED,
+        )
+        self.assertEqual(self._ids(groups), {self.MANAGED: ["t1"]})
+
+    def test_group_tasks_by_skill_hint_partial_hint_evidence_goes_to_managed_skill(self):
+        groups = group_tasks_by_skill_hint(
+            [self._task("t1", "alpha"), self._task("t1", session="s2")],
+            self.MANAGED,
+        )
+        self.assertEqual(self._ids(groups), {self.MANAGED: ["t1"]})
+        self.assertEqual(groups[self.MANAGED][0].skill_hint, "")
+
+    def test_group_tasks_by_skill_hint_hint_equal_to_managed_skill_is_one_group(self):
+        groups = group_tasks_by_skill_hint(
+            [self._task("t1", self.MANAGED), self._task("t2")], self.MANAGED
+        )
+        self.assertEqual(self._ids(groups), {self.MANAGED: ["t1", "t2"]})
 
 
 if __name__ == "__main__":

@@ -22,7 +22,6 @@ from typing import List, Optional
 from skillopt_sleep.consolidate import ConsolidationResult, consolidate
 from skillopt_sleep.types import TaskRecord
 
-
 # ── synthetic augmentation ("dream up" variants of today's tasks) ─────────────
 
 _WRAPPERS = [
@@ -49,6 +48,7 @@ def dream_augment(real_tasks: List[TaskRecord], *, factor: int = 1) -> List[Task
                 judge=dict(t.judge), system=t.system,
                 tags=list(t.tags) + ["dream"], split="train",
                 origin="dream", derived_from=t.id,
+                skill_hint=t.skill_hint,
             ))
     return out
 
@@ -90,6 +90,7 @@ def recall_similar(new_tasks: List[TaskRecord], history: List[TaskRecord],
             reference=h.reference, judge=dict(h.judge), system=h.system,
             tags=list(h.tags) + ["recall"], split="train", origin="real",
             derived_from=h.id,
+            skill_hint=h.skill_hint,
         ))
     return out
 

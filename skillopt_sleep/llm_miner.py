@@ -7,9 +7,11 @@ WITH a checkable rubric judge — the missing piece for real-data improvement.
 
 For each recurring intent it extracts:
   * a clean, generalized `intent` (the reusable task, stripped of one-off specifics)
-  * a `rubric` (what a good answer must satisfy) -> stored as a rule judge of
-    `contains`/`regex`/`section_present` checks the local judge can score, OR a
-    free-text rubric scored by the backend's judge() when no programmatic check fits
+  * a `rubric` (what a good answer must satisfy). A rubric, when present, is
+    always stored as the reference and scored by the backend's judge() -- it
+    resists the reward-hacking that literal/format checks invite. Programmatic
+    `contains`/`regex`/`section_present`/`tool_called` checks are kept only as a
+    fallback reference for the intents where the miner supplies no rubric.
   * a preference signal (was the user satisfied?) to weight failures
 
 It is deliberately conservative: it only emits a task when it can name a
@@ -18,55 +20,26 @@ can't make checkable are dropped (logged), not faked.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Callable, Dict, List
 
+from skillopt_sleep import prompts as prompt_registry
 from skillopt_sleep.backend import Backend, _extract_json
+from skillopt_sleep.judges import char_bound
+from skillopt_sleep.mine import session_skill_hint
 from skillopt_sleep.types import SessionDigest, TaskRecord
 
 
-_MINER_PROMPT = """You are mining a user's past AI-assistant sessions to find RECURRING tasks
-worth optimizing a skill for. From the session below, extract 0-3 reusable tasks.
-
-A good task is something the user asks for repeatedly or had to correct, where a
-GENERAL rule would help next time (formatting, structure, tool-use, conventions).
-Skip one-off or purely exploratory requests.
-
-For each task return:
-  - "intent": the reusable request, generalized (no one-off specifics)
-  - "checks": a list of programmatic success checks a grader can run on a future
-     answer. Each check is one of:
-        {"op":"section_present","arg":"<heading text>"}
-        {"op":"regex","arg":"<python regex the answer must match>"}
-        {"op":"contains","arg":"<substring the answer must contain>"}
-        {"op":"max_chars","arg":<int>}
-     Only include checks you are confident a GOOD answer must satisfy.
-  - "rubric": a one-sentence description of what a good answer looks like
-  - "satisfied": true/false — did the user seem satisfied with the assistant's answer?
-
-Return ONLY a JSON array (possibly empty). No prose.
-
-# Session
-project: __PROJECT__
-user prompts:
-__PROMPTS__
-assistant final (last):
-__FINAL__
-feedback signals: __FEEDBACK__
-"""
-
-
 def _digest_to_prompt(d: SessionDigest) -> str:
+    # Template lives in the central prompt registry (skillopt_sleep.prompts)
+    # so the dashboard can display and override it live.
     prompts = "\n".join(f"  - {p[:240]}" for p in d.user_prompts[:6]) or "  (none)"
     final = (d.assistant_finals[-1][:400] if d.assistant_finals else "(none)")
-    return (
-        _MINER_PROMPT
-        .replace("__PROJECT__", d.project or "(unknown)")
-        .replace("__PROMPTS__", prompts)
-        .replace("__FINAL__", final)
-        .replace("__FEEDBACK__", ", ".join(d.feedback_signals[:6]) or "(none)")
-    )
+    return prompt_registry.render("miner", {
+        "__PROJECT__": d.project or "(unknown)",
+        "__PROMPTS__": prompts,
+        "__FINAL__": final,
+        "__FEEDBACK__": ", ".join(d.feedback_signals[:6]) or "(none)",
+    })
 
 
 def _mk_task(d: SessionDigest, obj: Dict[str, Any], idx: int) -> TaskRecord | None:
@@ -74,33 +47,73 @@ def _mk_task(d: SessionDigest, obj: Dict[str, Any], idx: int) -> TaskRecord | No
     if len(intent) < 8:
         return None
     checks = obj.get("checks") or []
-    rubric = str(obj.get("rubric", "")).strip()
+    # A non-string rubric (e.g. a JSON null) must not become the literal "None"
+    # and outrank the checks; only a real string counts as a rubric.
+    rubric_raw = obj.get("rubric")
+    rubric = rubric_raw.strip() if isinstance(rubric_raw, str) else ""
     satisfied = bool(obj.get("satisfied", False))
 
-    # keep only well-formed checks
+    # Keep only well-formed checks: the scorer runs these verbatim during
+    # replay, so a max_chars/min_chars with a non-integer arg (or an arg-less
+    # op that needs one) would crash or fail forever. Drop those here, and keep
+    # the accepted shapes aligned with validate_checks() so a mined tasks file
+    # never fails validation later (it rejects bools and negative bounds).
+    _needs_str_arg = {"section_present", "regex", "contains", "not_contains", "tool_called"}
+    # Trimming a regex would change what it matches (leading/trailing spaces are
+    # significant in a pattern), so only substring/tool/heading args are stripped.
+    _strip_arg = _needs_str_arg - {"regex"}
     clean_checks = []
     for c in checks:
-        if isinstance(c, dict) and c.get("op") in {
-            "section_present", "regex", "contains", "max_chars", "min_chars",
-        }:
-            clean_checks.append({"op": c["op"], "arg": c.get("arg")})
+        if not isinstance(c, dict):
+            continue
+        op = c.get("op")
+        arg = c.get("arg")
+        if op in _needs_str_arg:
+            # Store the stripped value: stray whitespace would otherwise become
+            # part of the required substring / tool name.
+            if isinstance(arg, str) and arg.strip():
+                clean_checks.append(
+                    {"op": op, "arg": arg.strip() if op in _strip_arg else arg}
+                )
+        elif op in {"max_chars", "min_chars"}:
+            # Shared parser with validate_checks() so the two cannot drift:
+            # rejects bools, non-integral floats and inf/nan (OverflowError).
+            try:
+                bound = char_bound(arg)
+            except (OverflowError, TypeError, ValueError):
+                continue
+            if bound < 0:
+                continue
+            clean_checks.append({"op": op, "arg": bound})
+        elif op == "no_refusal":
+            clean_checks.append({"op": op, "arg": None})
 
     import hashlib
     tid = "llm_" + hashlib.sha256((d.project + intent).encode()).hexdigest()[:12]
 
-    if clean_checks:
-        return TaskRecord(
-            id=tid, project=d.project, intent=intent,
-            reference_kind="rule", judge={"kind": "rule", "checks": clean_checks},
-            outcome="success" if satisfied else "fail",
-            tags=["mined:llm"], source_sessions=[d.session_id],
-        )
+    judge = {"kind": "rule", "checks": clean_checks}
+    # The optimizer edits skill text that is prepended to the model's context,
+    # so ANY check for a literal string in the response can be satisfied by
+    # instructing the model to emit that string -- observed twice in practice,
+    # first with section_present and then with contains. Only semantic grading
+    # resists that, so a rubric always wins when the miner supplies one.
+    # Rule judges remain for imported gbrain-style benchmarks, which carry
+    # checks but no rubric.
     if rubric:
         return TaskRecord(
             id=tid, project=d.project, intent=intent,
             reference_kind="rubric", reference=rubric,
             outcome="success" if satisfied else "fail",
             tags=["mined:llm"], source_sessions=[d.session_id],
+            skill_hint=session_skill_hint(d),
+        )
+    if clean_checks:
+        return TaskRecord(
+            id=tid, project=d.project, intent=intent,
+            reference_kind="rule", judge=judge,
+            outcome="success" if satisfied else "fail",
+            tags=["mined:llm"], source_sessions=[d.session_id],
+            skill_hint=session_skill_hint(d),
         )
     return None  # not checkable -> drop
 
@@ -114,21 +127,45 @@ def make_llm_miner(
     """Return an llm_miner(digests) -> list[TaskRecord] bound to a backend."""
 
     def _miner(digests: List[SessionDigest]) -> List[TaskRecord]:
+        ev = getattr(backend, "evidence", None)
         out: List[TaskRecord] = []
         for d in digests[:max_sessions]:
             if not d.user_prompts:
                 continue
-            raw = backend._call(_digest_to_prompt(d), max_tokens=800)  # type: ignore[attr-defined]
+            prompt = _digest_to_prompt(d)
+            raw = backend._call(prompt, max_tokens=800)  # type: ignore[attr-defined]
             arr = _extract_json(raw, "array")
-            if not isinstance(arr, list):
-                continue
-            for i, obj in enumerate(arr[:3]):
+            candidates = arr if isinstance(arr, list) else []
+            made: List[TaskRecord] = []
+            dropped = 0
+            full = False
+            for i, obj in enumerate(candidates[:3]):
                 if isinstance(obj, dict):
                     t = _mk_task(d, obj, i)
                     if t is not None:
+                        made.append(t)
                         out.append(t)
+                    else:
+                        dropped += 1  # not checkable -> dropped, and now logged
                 if len(out) >= max_tasks:
-                    return out
+                    full = True
+                    break
+            if ev is not None:
+                # The transcript->task link of the evidentiary chain: what this
+                # session was, exactly what the miner was asked, exactly what it
+                # replied, and which TaskRecords (with checks) came out of it.
+                ev.log("mine", "miner_exchange", session_id=d.session_id,
+                       project=d.project, prompt=prompt, raw_reply=raw,
+                       parse_ok=isinstance(arr, list), n_candidates=len(candidates),
+                       n_tasks=len(made), n_dropped_uncheckable=dropped)
+                for t in made:
+                    ev.log("mine", "task_mined", task_id=t.id,
+                           session_id=d.session_id, intent=t.intent,
+                           reference_kind=t.reference_kind,
+                           checks=(t.judge or {}).get("checks", []),
+                           rubric=t.reference, outcome=t.outcome)
+            if full:
+                return out
         return out
 
     return _miner

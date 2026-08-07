@@ -51,6 +51,14 @@ _FLATTEN_MAP: dict[str, str] = {
     "model.claude_code_exec_use_sdk": "claude_code_exec_use_sdk",
     "model.claude_code_exec_effort": "claude_code_exec_effort",
     "model.claude_code_exec_max_thinking_tokens": "claude_code_exec_max_thinking_tokens",
+    "model.cursor_exec_path": "cursor_exec_path",
+    "model.cursor_exec_sandbox": "cursor_exec_sandbox",
+    "model.copilot_exec_path": "copilot_exec_path",
+    "model.copilot_exec_home": "copilot_exec_home",
+    "model.copilot_exec_allow_all_tools": "copilot_exec_allow_all_tools",
+    "model.copilot_chat_optimizer_model": "copilot_chat_optimizer_model",
+    "model.copilot_chat_target_model": "copilot_chat_target_model",
+    "model.copilot_chat_timeout": "copilot_chat_timeout",
     "model.codex_trace_to_optimizer": "codex_trace_to_optimizer",
     "model.azure_endpoint": "azure_endpoint",
     "model.azure_api_version": "azure_api_version",
@@ -125,6 +133,9 @@ _FLATTEN_MAP: dict[str, str] = {
     "evaluation.use_gate": "use_gate",
     "evaluation.gate_metric": "gate_metric",
     "evaluation.gate_mixed_weight": "gate_mixed_weight",
+    "evaluation.use_semantic_density": "use_semantic_density",
+    "evaluation.semantic_density_weight": "semantic_density_weight",
+    "evaluation.leading_words": "leading_words",
     "evaluation.sel_env_num": "sel_env_num",
     "evaluation.test_env_num": "test_env_num",
     "evaluation.eval_test": "eval_test",
@@ -158,7 +169,7 @@ def _load_yaml(path: str, _visited: set[str] | None = None) -> dict:
         raise ValueError(f"Circular _base_ inheritance: {abs_path}")
     _visited.add(abs_path)
 
-    with open(abs_path) as f:
+    with open(abs_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
     base_ref = cfg.pop("_base_", None)

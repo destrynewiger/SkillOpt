@@ -4,17 +4,43 @@ This guide walks through running a complete SkillOpt training on SearchQA.
 
 ## 1. Choose a Benchmark
 
-SkillOpt includes ready-to-use configs for several benchmarks:
+SkillOpt includes ready-to-use configs for several benchmarks. End-to-end
+runtime depends on the chosen models, provider latency, worker limits, and
+dataset size, so the project does not promise fixed wall-clock estimates.
 
-| Benchmark | Difficulty | Typical Runtime |
+| Benchmark | Modality | Additional setup |
 |---|---|---|
-| SearchQA | ⭐ Easy | ~30 min |
-| DocVQA | ⭐⭐ Medium | ~2 hours |
-| ALFWorld | ⭐⭐⭐ Hard | ~3 hours |
+| SearchQA | Text QA | Materialize the released ID manifest |
+| DocVQA | Document/image QA | Obtain and materialize images and examples |
+| ALFWorld | Embodied agent | Install ALFWorld and download its assets |
 
-We'll use **SearchQA** as it's the fastest to complete.
+We'll use **SearchQA** because it is the simplest text-only walkthrough.
 
-## 2. Configure
+## 2. Install and Materialize SearchQA
+
+The repository contains a stable SearchQA ID manifest, not the full runnable
+examples. From a source checkout, install the data extra and materialize the
+split once:
+
+```bash
+python -m pip install -e ".[searchqa]"
+python scripts/materialize_searchqa.py
+```
+
+By default, the materializer reads `data/searchqa_id_split/` and writes the
+train/validation/test payloads expected by the config to
+`data/searchqa_split/`; both paths have command-line overrides.
+
+## 3. Configure
+
+Configure and export one model backend as described in
+[Installation](installation.md#environment-variables). For example:
+
+```bash
+cp .env.example .env
+# Edit .env, choose one authentication mode, then export it:
+set -a; source .env; set +a
+```
 
 Review the config file:
 
@@ -42,55 +68,54 @@ evaluation:
   use_gate: true          # (validation gating)
 ```
 
-## 3. Train
+## 4. Train
 
 ```bash
-python scripts/train.py --config configs/searchqa/default.yaml
+python scripts/train.py \
+  --config configs/searchqa/default.yaml \
+  --out_root outputs/searchqa_first_run
 ```
 
-You'll see output like:
+The command prints the resolved backend/data configuration, per-step rollout
+and gate progress, and the generated output directory.
+
+## 5. Monitor
+
+The explicit `--out_root` above creates this run directory:
 
 ```
-[Step 1/8] Rollout: 20 items, 4 workers...
-[Step 1/8] Score: 0.65 → Reflect...
-[Step 1/8] 6 edit patches generated
-[Step 1/8] Selected 4 edits (lr=8, cosine → 7.7)
-[Step 1/8] Gate: val score 0.68 > 0.65 ✓ ACCEPT
-[Step 2/8] ...
-```
-
-## 4. Monitor
-
-Training outputs are saved to `outputs/<benchmark>/<run_id>/`:
-
-```
-outputs/searchqa/2024-01-15_10-30-00/
-├── steps/
-│   ├── step_0001/
-│   │   ├── candidate_skill.md
-│   │   ├── step_record.json
-│   │   └── trajectory_digest.json
-│   └── step_0002/
-├── slow_update/
-│   └── epoch_02/
-├── meta_skill/
-│   └── epoch_02/
-├── skills/
-│   └── step_0001.md
-├── best_skill.md
+outputs/searchqa_first_run/
+├── config.json
+├── runtime_state.json
 ├── history.json
-└── config.yaml
+├── best_skill.md
+├── skills/
+│   └── skill_vXXXX.md
+├── steps/
+│   └── step_XXXX/
+│       ├── candidate_skill.md
+│       ├── step_record.json
+│       └── trajectory_digest.json
+├── slow_update/
+│   └── epoch_XX/
+└── meta_skill/
+    └── epoch_XX/
 ```
 
-## 5. Evaluate
+## 6. Evaluate
 
 Evaluate the best skill on the test split:
 
 ```bash
 python scripts/eval_only.py \
   --config configs/searchqa/default.yaml \
-  --skill outputs/searchqa/<run_id>/skills/best_skill.md
+  --skill outputs/searchqa_first_run/best_skill.md \
+  --split valid_unseen
 ```
+
+The `--skill` path above is the training artifact. Evaluation writes
+`eval_summary.json` to its own timestamped `outputs/eval_.../` directory unless
+you pass an explicit `--out_root`; it does not overwrite the training run.
 
 ## WebUI
 
@@ -101,7 +126,9 @@ pip install -e ".[webui]"
 python -m skillopt_webui.app
 ```
 
-Then open `http://localhost:7860` in your browser to configure parameters and launch training.
+Then open `http://localhost:7860` in your browser to configure parameters and
+launch training. The default host is `0.0.0.0`; pass `--host 127.0.0.1` for a
+local-only dashboard.
 
 ## Next Steps
 

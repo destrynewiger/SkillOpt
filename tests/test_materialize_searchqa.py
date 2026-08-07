@@ -64,3 +64,16 @@ def test_materialize_searchqa_splits_fails_on_missing_manifest_id(tmp_path):
             {"train": [_row("a")]},
             dataset_name="example/searchqa",
         )
+
+
+def test_materialize_searchqa_splits_rejects_duplicate_manifest_ids(tmp_path):
+    manifest_dir = tmp_path / "manifest"
+    _write_manifest(manifest_dir, {"train": ["a"], "val": ["a"], "test": []})
+
+    with pytest.raises(ValueError, match="duplicate IDs"):
+        materialize_searchqa_splits(
+            manifest_dir,
+            tmp_path / "out",
+            {"train": [_row("a")]},
+            dataset_name="example/searchqa",
+        )

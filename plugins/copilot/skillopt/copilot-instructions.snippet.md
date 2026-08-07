@@ -23,9 +23,10 @@ Guidance:
 - Always run `skillopt_list_configs` first if you don't already know a valid `config` path.
 - `skillopt_train` and `skillopt_eval` are long-running and consume the user's
   model backend/budget — confirm the `config`, `backend`, and model choices
-  with the user before launching, and surface the held-out gate result when the
-  run finishes.
-- For one-off YAML overrides use `cfg_options` (e.g. `seed=123 batch_size=40`);
+  with the user before launching. Surface the held-out gate result for training,
+  or the evaluation score and output directory for eval-only runs.
+- For one-off YAML overrides use dotted `cfg_options` for structured configs
+  (e.g. `train.seed=123 train.batch_size=40`);
   for any other underlying flag use `extra_args`.
 
 This is distinct from the **SkillOpt-Sleep** MCP server (`skillopt-sleep`,

@@ -6,7 +6,6 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-
 _RESPONSES_API_MODELS = {
     "gpt-5.3-codex",
     "gpt-5.1-codex",
@@ -24,8 +23,14 @@ _BACKEND_DEFAULT_MODELS = {
     "claude": "claude-sonnet-4-6",
     "claude_chat": "claude-sonnet-4-6",
     "claude_code_exec": "claude-sonnet-4-6",
+    "cursor_exec": "composer-2.5",
+    # copilot_chat / copilot_exec deliberately use the Azure default fallback
+    # from default_model_for_backend(). That fallback configures shared role
+    # deployments (not the CLI model, which uses the copilot_chat model keys)
+    # and keeps the openai_chat optimizer for copilot_exec non-empty.
     "qwen_chat": "Qwen/Qwen3.5-4B",
     "minimax_chat": "MiniMax-M2.7",
+    "openai_compatible": "gpt-4o-mini",
 }
 
 _BACKEND_ALIASES = {
@@ -39,11 +44,23 @@ _BACKEND_ALIASES = {
     "claude": "claude_chat",
     "claude_chat": "claude_chat",
     "claude_code_exec": "claude_code_exec",
+    "cursor": "cursor_exec",
+    "cursor_agent": "cursor_exec",
+    "cursor_exec": "cursor_exec",
+    "copilot": "copilot_chat",
+    "copilot_cli": "copilot_chat",
+    "github_copilot": "copilot_chat",
+    "copilot_chat": "copilot_chat",
+    "copilot_exec": "copilot_exec",
     "anthropic": "claude_chat",
     "qwen": "qwen_chat",
     "qwen_chat": "qwen_chat",
     "minimax": "minimax_chat",
     "minimax_chat": "minimax_chat",
+    "openai_compatible": "openai_compatible",
+    "openai_compatible_chat": "openai_compatible",
+    "openai-compatible": "openai_compatible",
+    "compat": "openai_compatible",
 }
 
 

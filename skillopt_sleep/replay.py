@@ -4,8 +4,9 @@ Re-run mined TaskRecords offline under a given (skill, memory) and score
 them, producing the (hard, soft) signal SkillOpt's gate consumes.
 
 Single-shot text replay by default. Tasks whose rule judge requires a tool
-call (gbrain's `tool_called`) are run through the backend's real tool loop
-(attempt_with_tools), so tool use is verified honestly rather than self-reported.
+call (gbrain's `tool_called`) use the backend's tool-aware path. Backends that
+cannot enforce that execution boundary fail explicitly rather than scoring a
+self-reported tool call.
 """
 from __future__ import annotations
 
@@ -52,6 +53,18 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
         hard, soft, rationale = score_rule_judge(task.judge, response, tools_called)
     else:
         hard, soft, rationale = backend.judge(task, response)
+
+    ev = getattr(backend, "evidence", None)
+    if ev is not None:
+        # One scored-attempt record per (phase, task): the task->score link of
+        # the evidentiary chain, with the failing checks named in `why`.
+        ev.log("replay", "result",
+               phase=getattr(backend, "evidence_phase", ""),
+               task_id=task.id, split=task.split, origin=task.origin,
+               reference_kind=task.reference_kind, sample_id=sample_id,
+               hard=float(hard), soft=float(soft), why=rationale or "",
+               response_head=(response or "")[:400], tools_called=tools_called,
+               tokens=int(tokens), latency_ms=round(latency_ms, 1))
 
     return ReplayResult(
         id=task.id,
@@ -143,4 +156,3 @@ def multi_objective_reward(
     if total_w <= 0:
         return acc
     return (w_acc * acc + w_tokens * tok_score + w_latency * lat_score) / total_w
-

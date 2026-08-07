@@ -76,42 +76,79 @@ def apply_edits(doc: str, edits: List[EditRecord]) -> Tuple[str, List[EditRecord
     Returns (new_doc, applied_edits). Dedups: an `add` whose content already
     exists (normalized) is skipped. `delete`/`replace` match on normalized
     anchor substring.
+
+    See :func:`apply_edits_detailed` when the caller also needs the edits that
+    matched nothing.
+    """
+    new_doc, applied, _unmatched = apply_edits_detailed(doc, edits)
+    return new_doc, applied
+
+
+def apply_edits_detailed(
+    doc: str, edits: List[EditRecord]
+) -> Tuple[str, List[EditRecord], List[EditRecord]]:
+    """Apply edits and also report the ones that matched nothing.
+
+    Returns ``(new_doc, applied, unmatched)``. An edit lands in ``unmatched``
+    whenever it left the document unchanged:
+
+    * ``delete``/``replace`` whose anchor matches no existing line;
+    * ``replace`` whose replacement is already present verbatim;
+    * ``add`` whose content duplicates an existing line (normalized), or is
+      empty/whitespace;
+    * any unrecognized op.
+
+    Without this list such edits are invisible — they appear in neither the
+    applied nor the gate-rejected set, so a night can report zero edits while
+    the optimizer actually produced several.
     """
     lines = current_learned_lines(doc)
     norm_set = {_norm(line) for line in lines}
     applied: List[EditRecord] = []
+    unmatched: List[EditRecord] = []
 
     for e in edits:
         op = (e.op or "add").lower()
         if op == "add":
             if _norm(e.content) in norm_set or not e.content.strip():
+                unmatched.append(e)
                 continue
             lines.append(e.content.strip())
             norm_set.add(_norm(e.content))
             applied.append(e)
         elif op == "delete":
             anchor = _norm(e.anchor or e.content)
+            if not anchor:
+                unmatched.append(e)
+                continue
             keep = [line for line in lines if anchor not in _norm(line)]
             if len(keep) != len(lines):
                 lines = keep
                 norm_set = {_norm(line) for line in lines}
                 applied.append(e)
+            else:
+                unmatched.append(e)
         elif op == "replace":
             anchor = _norm(e.anchor)
+            replacement = e.content.strip()
             new_lines = []
             changed = False
             for line in lines:
                 if anchor and anchor in _norm(line):
-                    new_lines.append(e.content.strip())
-                    changed = True
+                    new_lines.append(replacement)
+                    changed = changed or replacement != line
                 else:
                     new_lines.append(line)
             if changed:
                 lines = new_lines
                 norm_set = {_norm(line) for line in lines}
                 applied.append(e)
+            else:
+                unmatched.append(e)
+        else:
+            unmatched.append(e)
 
-    return set_learned(doc, lines), applied
+    return set_learned(doc, lines), applied, unmatched
 
 
 def ensure_skill_scaffold(doc: str, *, name: str, description: str) -> str:

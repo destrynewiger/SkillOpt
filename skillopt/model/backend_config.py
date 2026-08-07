@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 
-from skillopt.model.common import default_model_for_backend, normalize_backend_name
+from skillopt.model.common import normalize_backend_name
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -28,6 +28,16 @@ CLAUDE_CODE_EXEC_PATH = os.environ.get("CLAUDE_CODE_EXEC_PATH", "claude")
 CLAUDE_CODE_EXEC_PROFILE = os.environ.get("CLAUDE_CODE_EXEC_PROFILE", "")
 CLAUDE_CODE_EXEC_USE_SDK = os.environ.get("CLAUDE_CODE_EXEC_USE_SDK", "auto")
 CLAUDE_CODE_EXEC_EFFORT = os.environ.get("CLAUDE_CODE_EXEC_EFFORT", "medium")
+CURSOR_EXEC_PATH = os.environ.get("CURSOR_EXEC_PATH", "cursor-agent")
+CURSOR_EXEC_SANDBOX = os.environ.get("CURSOR_EXEC_SANDBOX", "enabled")
+COPILOT_EXEC_PATH = os.environ.get("COPILOT_EXEC_PATH", "copilot")
+COPILOT_EXEC_HOME = os.environ.get("COPILOT_EXEC_HOME", "")
+COPILOT_EXEC_ALLOW_ALL_TOOLS = (
+    "1" if _parse_bool(os.environ.get("COPILOT_EXEC_ALLOW_ALL_TOOLS"), False) else "0"
+)
+COPILOT_CHAT_OPTIMIZER_MODEL = os.environ.get("COPILOT_CHAT_OPTIMIZER_MODEL", "")
+COPILOT_CHAT_TARGET_MODEL = os.environ.get("COPILOT_CHAT_TARGET_MODEL", "")
+COPILOT_CHAT_TIMEOUT = os.environ.get("COPILOT_CHAT_TIMEOUT", "600")
 
 
 def _parse_int(value: str | None, default: int) -> int:
@@ -49,10 +59,19 @@ CLAUDE_CODE_EXEC_MAX_THINKING_TOKENS = max(
 def set_optimizer_backend(backend: str) -> None:
     global OPTIMIZER_BACKEND
     OPTIMIZER_BACKEND = normalize_backend_name(backend or "openai_chat")
-    if OPTIMIZER_BACKEND not in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat"}:
+    if OPTIMIZER_BACKEND not in {
+        "openai_chat",
+        "claude_chat",
+        "qwen_chat",
+        "minimax_chat",
+        "openai_compatible",
+        "copilot_chat",
+        "codex_exec",
+    }:
         raise ValueError(
             f"Unsupported optimizer backend: {OPTIMIZER_BACKEND!r}. "
-            "Supported values are 'openai_chat', 'claude_chat', 'qwen_chat', and 'minimax_chat'."
+            "Supported values are 'openai_chat', 'claude_chat', 'qwen_chat', 'minimax_chat', "
+            "'openai_compatible', 'copilot_chat', and 'codex_exec'."
         )
     os.environ["OPTIMIZER_BACKEND"] = OPTIMIZER_BACKEND
 
@@ -64,10 +83,12 @@ def get_optimizer_backend() -> str:
 def set_target_backend(backend: str) -> None:
     global TARGET_BACKEND
     TARGET_BACKEND = normalize_backend_name(backend or "openai_chat")
-    if TARGET_BACKEND not in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "codex_exec", "claude_code_exec"}:
+    if TARGET_BACKEND not in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "openai_compatible", "copilot_chat", "codex_exec", "claude_code_exec", "cursor_exec", "copilot_exec"}:
         raise ValueError(
             f"Unsupported target backend: {TARGET_BACKEND!r}. "
-            "Supported values are 'openai_chat', 'claude_chat', 'qwen_chat', 'minimax_chat', 'codex_exec', and 'claude_code_exec'."
+            "Supported values are 'openai_chat', 'claude_chat', 'qwen_chat', 'minimax_chat', "
+            "'openai_compatible', 'copilot_chat', 'codex_exec', 'claude_code_exec', "
+            "'cursor_exec', and 'copilot_exec'."
         )
     os.environ["TARGET_BACKEND"] = TARGET_BACKEND
 
@@ -77,15 +98,23 @@ def get_target_backend() -> str:
 
 
 def is_target_exec_backend() -> bool:
-    return TARGET_BACKEND in {"codex_exec", "claude_code_exec"}
+    return TARGET_BACKEND in {"codex_exec", "claude_code_exec", "cursor_exec", "copilot_exec"}
 
 
 def is_optimizer_chat_backend() -> bool:
-    return OPTIMIZER_BACKEND in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat"}
+    return OPTIMIZER_BACKEND in {
+        "openai_chat",
+        "claude_chat",
+        "qwen_chat",
+        "minimax_chat",
+        "openai_compatible",
+        "copilot_chat",
+        "codex_exec",
+    }
 
 
 def is_target_chat_backend() -> bool:
-    return TARGET_BACKEND in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat"}
+    return TARGET_BACKEND in {"openai_chat", "claude_chat", "qwen_chat", "minimax_chat", "openai_compatible", "copilot_chat"}
 
 
 def configure_codex_exec(
@@ -182,4 +211,123 @@ def get_claude_code_exec_config() -> dict[str, str | int]:
         "effort": CLAUDE_CODE_EXEC_EFFORT,
         "max_thinking_tokens": CLAUDE_CODE_EXEC_MAX_THINKING_TOKENS,
         "empty_response_retries": EXEC_EMPTY_RESPONSE_RETRIES,
+    }
+
+
+def configure_cursor_exec(
+    *,
+    path: str | None = None,
+    sandbox: str | None = None,
+) -> None:
+    global CURSOR_EXEC_PATH, CURSOR_EXEC_SANDBOX
+    if path is not None:
+        CURSOR_EXEC_PATH = str(path).strip() or "cursor-agent"
+        os.environ["CURSOR_EXEC_PATH"] = CURSOR_EXEC_PATH
+    if sandbox is not None:
+        normalized_sandbox = str(sandbox).strip().lower() or "enabled"
+        if normalized_sandbox not in {"enabled", "disabled"}:
+            raise ValueError("cursor_exec sandbox must be 'enabled' or 'disabled'")
+        CURSOR_EXEC_SANDBOX = normalized_sandbox
+        os.environ["CURSOR_EXEC_SANDBOX"] = CURSOR_EXEC_SANDBOX
+
+
+def get_cursor_exec_config() -> dict[str, str | int]:
+    if CURSOR_EXEC_SANDBOX not in {"enabled", "disabled"}:
+        raise ValueError("cursor_exec sandbox must be 'enabled' or 'disabled'")
+    return {
+        "path": CURSOR_EXEC_PATH,
+        "sandbox": CURSOR_EXEC_SANDBOX,
+        "empty_response_retries": EXEC_EMPTY_RESPONSE_RETRIES,
+    }
+
+
+def configure_copilot_exec(
+    *,
+    path: str | None = None,
+    home: str | None = None,
+    allow_all_tools: bool | str | None = None,
+) -> None:
+    """Configure the GitHub Copilot CLI exec backend.
+
+    ``home`` points ``COPILOT_HOME`` at an isolated config dir so the user's MCP
+    servers and custom instructions are not loaded during a rollout. Auth lives
+    outside ``COPILOT_HOME`` (OS credential store / token env vars), so isolating
+    the home does not break authentication.
+    """
+    global COPILOT_EXEC_PATH, COPILOT_EXEC_HOME, COPILOT_EXEC_ALLOW_ALL_TOOLS
+    if path is not None:
+        COPILOT_EXEC_PATH = str(path).strip() or "copilot"
+        os.environ["COPILOT_EXEC_PATH"] = COPILOT_EXEC_PATH
+    if home is not None:
+        COPILOT_EXEC_HOME = str(home).strip()
+        os.environ["COPILOT_EXEC_HOME"] = COPILOT_EXEC_HOME
+    if allow_all_tools is not None:
+        normalized = str(allow_all_tools).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            COPILOT_EXEC_ALLOW_ALL_TOOLS = "1"
+        elif normalized in {"0", "false", "no", "off", ""}:
+            COPILOT_EXEC_ALLOW_ALL_TOOLS = "0"
+        else:
+            raise ValueError(
+                "copilot_exec allow_all_tools must be a boolean-like value"
+            )
+        os.environ["COPILOT_EXEC_ALLOW_ALL_TOOLS"] = COPILOT_EXEC_ALLOW_ALL_TOOLS
+
+
+def get_copilot_exec_config() -> dict[str, str | int]:
+    if COPILOT_EXEC_ALLOW_ALL_TOOLS not in {"0", "1"}:
+        raise ValueError("copilot_exec allow_all_tools must be '0' or '1'")
+    return {
+        "path": COPILOT_EXEC_PATH,
+        "home": COPILOT_EXEC_HOME,
+        "allow_all_tools": COPILOT_EXEC_ALLOW_ALL_TOOLS,
+        "empty_response_retries": EXEC_EMPTY_RESPONSE_RETRIES,
+    }
+
+
+def configure_copilot_chat(
+    *,
+    path: str | None = None,
+    home: str | None = None,
+    optimizer_model: str | None = None,
+    target_model: str | None = None,
+    timeout: int | str | None = None,
+) -> None:
+    """Configure the Copilot CLI *chat* backend (optimizer and/or target).
+
+    Unlike `copilot_exec`, this runs the CLI as a plain chat model so a whole
+    run can use CLI authentication without a separate provider API key.
+    """
+    global COPILOT_EXEC_PATH, COPILOT_EXEC_HOME
+    global COPILOT_CHAT_OPTIMIZER_MODEL, COPILOT_CHAT_TARGET_MODEL, COPILOT_CHAT_TIMEOUT
+    if path is not None:
+        COPILOT_EXEC_PATH = str(path).strip() or "copilot"
+        os.environ["COPILOT_EXEC_PATH"] = COPILOT_EXEC_PATH
+    if home is not None:
+        COPILOT_EXEC_HOME = str(home).strip()
+        os.environ["COPILOT_EXEC_HOME"] = COPILOT_EXEC_HOME
+    if optimizer_model is not None:
+        COPILOT_CHAT_OPTIMIZER_MODEL = str(optimizer_model).strip()
+        os.environ["COPILOT_CHAT_OPTIMIZER_MODEL"] = COPILOT_CHAT_OPTIMIZER_MODEL
+    if target_model is not None:
+        COPILOT_CHAT_TARGET_MODEL = str(target_model).strip()
+        os.environ["COPILOT_CHAT_TARGET_MODEL"] = COPILOT_CHAT_TARGET_MODEL
+    if timeout is not None:
+        value = str(timeout).strip()
+        if not value.isdigit() or int(value) <= 0:
+            raise ValueError("copilot_chat timeout must be a positive integer")
+        COPILOT_CHAT_TIMEOUT = value
+        os.environ["COPILOT_CHAT_TIMEOUT"] = COPILOT_CHAT_TIMEOUT
+
+
+def get_copilot_chat_config() -> dict[str, str | int]:
+    timeout = str(COPILOT_CHAT_TIMEOUT).strip()
+    if not timeout.isdigit() or int(timeout) <= 0:
+        raise ValueError("copilot_chat timeout must be a positive integer")
+    return {
+        "path": COPILOT_EXEC_PATH,
+        "home": COPILOT_EXEC_HOME,
+        "optimizer_model": COPILOT_CHAT_OPTIMIZER_MODEL,
+        "target_model": COPILOT_CHAT_TARGET_MODEL,
+        "timeout": int(timeout),
     }

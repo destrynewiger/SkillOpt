@@ -73,6 +73,9 @@ Issues = "https://github.com/microsoft/SkillOpt/issues"
 # skillopt_webui = the Gradio dashboard (installed via the `webui` extra)
 include = ["skillopt", "skillopt.*", "skillopt_sleep", "skillopt_sleep.*", "skillopt_webui", "skillopt_webui.*", "scripts*"]
 
+[tool.setuptools.package-data]
+"*" = ["*.md"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

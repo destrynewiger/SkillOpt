@@ -20,6 +20,8 @@ HOME_STATE_DIR = os.path.expanduser("~/.skillopt-sleep")
 CLAUDE_HOME = os.path.expanduser("~/.claude")
 CODEX_HOME = os.path.expanduser("~/.codex")
 HERMES_HOME = os.path.expanduser("~/.hermes")
+PI_HOME = os.path.expanduser("~/.pi")
+CURSOR_HOME = os.path.expanduser("~/.cursor")
 
 
 DEFAULTS: Dict[str, Any] = {
@@ -27,6 +29,13 @@ DEFAULTS: Dict[str, Any] = {
     "claude_home": CLAUDE_HOME,
     "codex_home": CODEX_HOME,
     "hermes_home": HERMES_HOME,
+    "pi_home": PI_HOME,
+    "cursor_home": CURSOR_HOME,
+    "vscode_workspace_storage": "",  # "" => auto-detect platform defaults
+    "copilot_cli_session_store": "",  # "" => ~/.copilot/session-store.db
+    # Explicit sources also include hermes, copilot, copilot_cli, cursor, and pi.
+    # ``auto`` keeps
+    # the established Codex-then-Claude precedence for backward compatibility.
     "transcript_source": "claude",  # "claude" | "codex" | "hermes" | "auto"
     "projects": "invoked",        # "invoked" | "all" | [list of abs paths]
     "invoked_project": "",        # filled at runtime (cwd) when projects == "invoked"
@@ -38,14 +47,25 @@ DEFAULTS: Dict[str, Any] = {
     "val_fraction": 0.34,         # real tasks reserved to gate updates
     "test_fraction": 0.0,         # real tasks reserved as the final held-out measure
     # ── optimizer ──────────────────────────────────────────────────────────
-    "backend": "mock",            # "mock" | "claude" | "codex" | "copilot"
+    "backend": "mock",            # "mock" | "claude" | "codex" | "copilot" | "cursor" | "pi"
     "model": "",                  # backend-specific; "" => backend default
+    # Dual-backend split (both empty => single backend above plays all roles).
+    # target = the model whose skill is deployed (runs `attempt` rollouts);
+    # optimizer = the model that mines tasks, judges rubrics, writes edits.
+    "optimizer_backend": "",
+    "optimizer_model": "",
+    "target_backend": "",
+    "target_model": "",
+    "azure_endpoint": "",         # explicit endpoint for azure/compat backends
     "gate_mode": "on",            # "on" (validation-gated) | "off" (greedy, no hard filter)
     "codex_path": "",             # "" => auto-detect the real @openai/codex binary
+    "pi_path": "",                # "" => use `pi` on PATH
+    "cursor_path": "",            # "" => auto-detect the Cursor Agent CLI
     "edit_budget": 4,             # textual learning rate (max edits/night)
+    "preferences": "",            # free-text house rules injected into reflect as a prior
     "gate_metric": "mixed",       # hard | soft | mixed (mixed best for tiny holdouts)
     "gate_mixed_weight": 0.5,
-    "replay_mode": "mock",        # "mock" (sandboxed prompt) | "fresh" (worktree)
+    "replay_mode": "mock",        # report label; fresh-worktree replay is not implemented
     # ── dream + recall (opt-in; defaults reproduce the prior single-shot loop) ─
     "dream_rollouts": 1,          # >1 => multi-rollout contrastive reflection per task
     "dream_factor": 0,            # >0 => add N synthetic variants of each task to the dream
@@ -56,6 +76,9 @@ DEFAULTS: Dict[str, Any] = {
     "target_skill_path": "",      # explicit SKILL.md target for repo-scoped agents
     "target_task_filter": True,   # prefer mined tasks matching target_skill_path/text
     "progress": False,            # print phase progress to stderr
+    # ── observability ──────────────────────────────────────────────────────
+    "evidence_log": True,         # write per-night evidence.jsonl (full evidentiary chain)
+    "evidence_max_chars": 4000,   # per-field truncation cap for evidence events
     # ── adoption / safety ──────────────────────────────────────────────────
     "auto_adopt": False,          # default: stage + require explicit `adopt`
     "managed_skill_name": "skillopt-sleep-learned",
@@ -112,6 +135,30 @@ class SleepConfig:
     @property
     def hermes_sessions_dir(self) -> str:
         return os.path.join(self.data.get("hermes_home", HERMES_HOME), "sessions")
+
+    @property
+    def pi_sessions_dir(self) -> str:
+        pi_home = os.path.abspath(os.path.expanduser(str(self.data["pi_home"])))
+        return os.path.join(pi_home, "agent", "sessions")
+
+    @property
+    def cursor_projects_dir(self) -> str:
+        cursor_home = os.path.abspath(os.path.expanduser(str(self.data["cursor_home"])))
+        return os.path.join(cursor_home, "projects")
+
+    @property
+    def copilot_cli_session_store(self) -> str:
+        value = self.data.get("copilot_cli_session_store", "") or ""
+        if not value:
+            return ""
+        return os.path.abspath(os.path.expanduser(str(value)))
+
+    @property
+    def vscode_workspace_storage(self) -> str:
+        value = self.data.get("vscode_workspace_storage", "") or ""
+        if not value:
+            return ""
+        return os.path.abspath(os.path.expanduser(str(value)))
 
     @property
     def history_path(self) -> str:

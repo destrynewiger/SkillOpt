@@ -24,28 +24,56 @@ else
     d="$(dirname "$d")"
   done
 fi
-if [ -z "${REPO_ROOT:-}" ]; then
-  echo "[sleep] ERROR: could not locate the skillopt_sleep package. Set SKILLOPT_SLEEP_REPO to the repo root." >&2
-  exit 1
-fi
-
-PY=""
-# Allow explicit Python override (useful on macOS with old system Python).
-if [ -n "${SKILLOPT_SLEEP_PYTHON:-}" ]; then
-  PY="$SKILLOPT_SLEEP_PYTHON"
-else
-  for cand in python3.12 python3.11 python3.10 python3; do
-    if command -v "$cand" >/dev/null 2>&1; then
-      ver="$("$cand" -c 'import sys; print("%d%d" % sys.version_info[:2])' 2>/dev/null || echo 0)"
-      if [ "${ver:-0}" -ge 310 ]; then PY="$cand"; break; fi
-    fi
-  done
-fi
-if [ -z "$PY" ]; then
-  echo "[sleep] ERROR: need Python >= 3.10 (found none)." >&2
-  exit 1
-fi
-
 if [ "$#" -eq 0 ]; then set -- status; fi
-cd "$REPO_ROOT"
-exec "$PY" -m skillopt_sleep "$@"
+
+if [ -n "${REPO_ROOT:-}" ]; then
+  # Source checkout: run from repo root so skillopt_sleep/ is importable.
+  PY=""
+  # Allow explicit Python override (useful on macOS with old system Python).
+  if [ -n "${SKILLOPT_SLEEP_PYTHON:-}" ]; then
+    PY="$SKILLOPT_SLEEP_PYTHON"
+  else
+    for cand in python3.12 python3.11 python3.10 python3; do
+      if command -v "$cand" >/dev/null 2>&1; then
+        ver="$("$cand" -c 'import sys; print("%d%d" % sys.version_info[:2])' 2>/dev/null || echo 0)"
+        if [ "${ver:-0}" -ge 310 ]; then PY="$cand"; break; fi
+      fi
+    done
+  fi
+  if [ -z "$PY" ]; then
+    echo "[sleep] ERROR: need Python >= 3.10 (found none)." >&2
+    exit 1
+  fi
+  cd "$REPO_ROOT"
+  exec "$PY" -m skillopt_sleep "$@"
+fi
+
+# No source checkout found — fall back to an installed engine.
+
+# Fallback 1: skillopt-sleep CLI on PATH (uv tool install / pipx / pip install).
+# Checked before the import fallback because uv tool install / pipx isolate the
+# package from the system Python's import path, so `python -c "import
+# skillopt_sleep"` would fail even though the CLI is available.
+if command -v skillopt-sleep >/dev/null 2>&1; then
+  exec skillopt-sleep "$@"
+fi
+
+# Fallback 2: importable as a module (pip install into the active Python).
+# Pick a Python >= 3.10 and check importability.
+PY=""
+for cand in python3.12 python3.11 python3.10 python3; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    ver="$("$cand" -c 'import sys; print("%d%d" % sys.version_info[:2])' 2>/dev/null || echo 0)"
+    if [ "${ver:-0}" -ge 310 ] && "$cand" -c "import skillopt_sleep" >/dev/null 2>&1; then
+      PY="$cand"; break
+    fi
+  fi
+done
+if [ -n "$PY" ]; then
+  exec "$PY" -m skillopt_sleep "$@"
+fi
+
+echo "[sleep] ERROR: could not locate the skillopt_sleep package." >&2
+echo "[sleep] Install it with 'uv tool install skillopt' or 'pip install skillopt'," >&2
+echo "[sleep] or set SKILLOPT_SLEEP_REPO to a clone of the SkillOpt repo." >&2
+exit 1

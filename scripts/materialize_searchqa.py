@@ -44,6 +44,27 @@ def load_manifest_ids(manifest_dir: Path) -> dict[str, list[str]]:
     return split_ids
 
 
+def _reject_duplicate_manifest_ids(split_ids: Mapping[str, Iterable[str]]) -> None:
+    seen: dict[str, str] = {}
+    duplicates: dict[str, list[str]] = {}
+    for split, ids in split_ids.items():
+        for item_id in ids:
+            if item_id in seen:
+                duplicates.setdefault(item_id, [seen[item_id]]).append(split)
+            else:
+                seen[item_id] = split
+
+    if duplicates:
+        preview = ", ".join(
+            f"{item_id} ({'/'.join(splits)})"
+            for item_id, splits in sorted(duplicates.items())[:5]
+        )
+        raise ValueError(
+            "SearchQA split manifest contains duplicate IDs across splits. "
+            f"First IDs: {preview}"
+        )
+
+
 def _iter_dataset_rows(dataset: Mapping[str, Iterable[dict]]) -> Iterable[dict]:
     for source_split in dataset.values():
         yield from source_split
@@ -78,6 +99,7 @@ def materialize_searchqa_splits(
     manifest_dir = manifest_dir.resolve()
     output_dir = output_dir.resolve()
     split_ids = load_manifest_ids(manifest_dir)
+    _reject_duplicate_manifest_ids(split_ids)
     wanted_ids = {item_id for ids in split_ids.values() for item_id in ids}
 
     selected: dict[str, dict] = {}

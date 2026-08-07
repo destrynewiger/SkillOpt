@@ -243,7 +243,12 @@ def _assistant_message_schema_wrapper() -> str:
 
 def _run_claude_print(*, system: str, prompt: str, model: str, tools: list[dict[str, Any]] | None, tool_choice: str | dict[str, Any] | None, return_message: bool, timeout: int | None, attachments: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, Any], dict[str, int]]:
     effort = _normalize_reasoning_effort(REASONING_EFFORT)
-    with tempfile.TemporaryDirectory(prefix="skillopt_claude_") as temp_dir:
+    # A lingering claude/node handle can make Windows cleanup raise WinError 32.
+    # Python 3.10+ supports suppressing cleanup failures while retaining
+    # TemporaryDirectory's normal lifecycle and best-effort removal behavior.
+    with tempfile.TemporaryDirectory(
+        prefix="skillopt_claude_", ignore_cleanup_errors=True,
+    ) as temp_dir:
         copied_attachments = _copy_attachments_to_temp(attachments or [], temp_dir)
         prompt_for_cli = _append_attachment_instructions(prompt, copied_attachments)
         cmd = [CLAUDE_BIN, "-p", "--output-format", "json", "--permission-mode", CLAUDE_PERMISSION_MODE, "--add-dir", temp_dir]

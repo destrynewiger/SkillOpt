@@ -86,6 +86,34 @@ def _tool_names_from_content(content: Any) -> List[str]:
     return names
 
 
+def _skill_names_from_content(content: Any) -> List[str]:
+    """Extract skill targets from Claude ``Skill`` tool-use blocks.
+
+    Only well-formed invocations count: the block type must be ``tool_use``,
+    its name exactly ``Skill``, and ``input.skill`` a non-blank string. The
+    name is returned whitespace-trimmed but otherwise verbatim; no other tool
+    input and no tool output is read.
+    """
+    names: List[str] = []
+    if not isinstance(content, list):
+        return names
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") != "tool_use" or b.get("name") != "Skill":
+            continue
+        args = b.get("input")
+        if not isinstance(args, dict):
+            continue
+        skill = args.get("skill")
+        if not isinstance(skill, str):
+            continue
+        skill = skill.strip()
+        if skill:
+            names.append(skill)
+    return names
+
+
 def _detect_feedback(text: str) -> List[str]:
     low = text.lower()
     sig: List[str] = []
@@ -109,6 +137,13 @@ def _is_meta_prompt(text: str) -> bool:
         return True
     if t.startswith("[Pasted text") or t.startswith("Caveat:"):
         return True
+    # Expanded slash-command prompts (Claude Code injects the full command
+    # body as a user message, wrapped in <command-message>/<command-name>
+    # tags or rendered as "# /<name> — ..." headers). Not a user intent.
+    if "<command-message>" in t[:200] or "<command-name>" in t[:200]:
+        return True
+    if t.startswith("# /"):
+        return True
     return False
 
 
@@ -126,9 +161,38 @@ _REPLAY_PROMPT_MARKERS = (
     "You are a strict grader",
     "Score the response 0.0-1.0",
     "You are SkillOpt-Sleep",
+    "You are an expert success-pattern analyst",
+    "You are an expert failure-pattern analyst",
     "## TASK\n",
     "## SKILL\n",
+    # Engine rollouts render the skill under this heading before the task.
+    "## Skill\n",
 )
+
+
+# Sessions written by OTHER tools' sub-agents (memory observers, critic
+# sub-agents, plugin self-invocations). These are multi-turn, so the
+# single-turn heuristic in _is_headless_replay never catches them. If the
+# FIRST user prompt matches any marker, the whole session is
+# machine-generated, not a real user task.
+_AGENT_SESSION_MARKERS = (
+    "You are a Claude-Mem",              # claude-mem observer agent
+    "Hello memory agent",                # claude-mem observer continuation
+    "You are driving **SkillOpt-Sleep**",  # this plugin's own command body
+) + tuple(
+    # users can add markers for their own tools' agent prompts
+    p.strip()
+    for p in os.environ.get("SKILLOPT_SLEEP_AGENT_MARKERS", "").split(",")
+    if p.strip()
+)
+
+
+def _is_agent_session(digest: "SessionDigest") -> bool:
+    """Detect transcripts written by other tools' sub-agents (see markers)."""
+    if not digest.user_prompts:
+        return False
+    first = digest.user_prompts[0]
+    return any(marker in first for marker in _AGENT_SESSION_MARKERS)
 
 
 def _is_headless_replay(digest: "SessionDigest") -> bool:
@@ -174,6 +238,7 @@ def digest_transcript(path: str) -> Optional[SessionDigest]:
     user_prompts: List[str] = []
     assistant_finals: List[str] = []
     tools: List[str] = []
+    skills: List[str] = []
     files: List[str] = []
     feedback: List[str] = []
     n_user = 0
@@ -208,6 +273,7 @@ def digest_transcript(path: str) -> Optional[SessionDigest]:
         elif role == "assistant":
             n_asst += 1
             tools.extend(_tool_names_from_content(content))
+            skills.extend(_skill_names_from_content(content))
             text = _text_from_content(content)
             if text.strip():
                 assistant_finals.append(text.strip())
@@ -234,6 +300,7 @@ def digest_transcript(path: str) -> Optional[SessionDigest]:
         user_prompts=user_prompts,
         assistant_finals=assistant_finals[-5:],  # last few finals are the useful ones
         tools_used=_dedup(tools),
+        skills_used=_dedup(skills),
         files_touched=_dedup(files),
         feedback_signals=feedback,
         n_user_turns=n_user,
@@ -279,8 +346,12 @@ def harvest(
 
     paths: List[str] = []
     for root, _dirs, files in os.walk(transcripts_dir):
+        # Sub-agent sidechain transcripts (<session>/subagents/agent-*.jsonl)
+        # are Claude-authored prompts, not user tasks — never harvest them.
+        if os.path.basename(root) == "subagents":
+            continue
         for fn in files:
-            if fn.endswith(".jsonl"):
+            if fn.endswith(".jsonl") and not fn.startswith("agent-"):
                 paths.append(os.path.join(root, fn))
     # newest first by mtime
     paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -291,6 +362,8 @@ def harvest(
             continue
         if _is_headless_replay(d):
             continue  # Issue #62: skip engine's own headless replay sessions
+        if _is_agent_session(d):
+            continue  # skip other tools' sub-agent transcripts (claude-mem etc.)
         if not _project_matches(d.project or "", scope, invoked_project):
             continue
         if since_iso and d.ended_at and d.ended_at < since_iso:

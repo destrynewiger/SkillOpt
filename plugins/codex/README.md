@@ -9,7 +9,8 @@ as the Claude Code plugin (`skillopt_sleep`), wrapped for Codex.
 > [gbrain-evals](https://github.com/garrytan/gbrain-evals) `skillopt-v1`
 > benchmark, a deliberately deficient skill goes **0.00 → 1.00** on a held-out
 > set with the Codex backend (incl. the tool-use seed via a real tool loop).
-> See [the SkillOpt-Sleep guide section](https://microsoft.github.io/SkillOpt/docs/guideline.html#sleep).
+> See the recorded results and limitations in
+> [`docs/sleep/RESULTS.md`](../../docs/sleep/RESULTS.md).
 
 ## What Codex supports (and what we use)
 
@@ -21,11 +22,20 @@ rules. The shared runner remains a plain shell entrypoint that the skill calls.
 
 ## Install
 
+On Linux/macOS:
 ```bash
-git clone <repo-url> SkillOpt-Sleep
-cd SkillOpt-Sleep
+git clone https://github.com/microsoft/SkillOpt.git
+cd SkillOpt
 bash plugins/codex/install.sh          # installs the skill
 export SKILLOPT_SLEEP_REPO="$(pwd)"    # so the runner is found from anywhere
+```
+
+On Windows (PowerShell):
+```powershell
+git clone <repo-url> SkillOpt-Sleep
+cd SkillOpt-Sleep
+powershell -File plugins/codex/install.ps1
+[System.Environment]::SetEnvironmentVariable("SKILLOPT_SLEEP_REPO", "$(pwd)", "User")
 ```
 
 If a previous install created `~/.codex/prompts/sleep.md`, the installer moves
@@ -60,15 +70,19 @@ python -m skillopt_sleep run --project "$(pwd)" --source codex --backend codex \
 `~/.codex/archived_sessions`. Use `--codex-home /path/to/.codex` to point at a
 different Codex home, or `--source auto` to try Codex archives first and fall
 back to Claude Code transcripts. Default backend is `mock` (no API spend).
-`--backend codex` uses your Codex budget for real improvement. Bound live runs
+`--backend codex` uses your Codex budget for model-driven optimization; an
+accepted gain is task-dependent, not guaranteed. Bound live runs
 with `--max-sessions` and `--max-tasks`; add `--progress` because Codex-backed
 mining, replay, and reflection can be slow and otherwise quiet. Use
 `--target-skill-path` to stage/adopt into a repo-scoped Codex skill such as
 `.agents/skills/<name>/SKILL.md`; target runs over-sample mined tasks and
-prefer tasks that match the target skill's path, headings, and content. All the
-controllable knobs (`--gate on|off`, `--rollouts-k`, `--budget-tokens`,
-`--preferences`, optimizer/target split) work identically — see
-[the SkillOpt-Sleep guide section](https://microsoft.github.io/SkillOpt/docs/guideline.html#sleep).
+prefer tasks that match the target skill's path, headings, and content. The
+implemented main-CLI flags work the same across the shared integrations, and
+`--preferences "..."` is available for house rules. Advanced keys such as
+`gate_mode`, `dream_rollouts`, and `recall_k` belong in the Sleep config; the
+nightly CLI does not expose `--gate`, `--rollouts-k`, token/time-budget, or
+optimizer/target-split flags. See the
+[shared CLI reference](../README.md#supported-cli-surface).
 
 For privacy-sensitive projects, split the run into reviewable steps:
 
@@ -85,6 +99,11 @@ python -m skillopt_sleep dry-run --project "$(pwd)" --backend codex \
 Inspect/redact the JSON and set `"reviewed": true` before using a real backend.
 `--tasks-file` skips archive harvest/mining and replays only the reviewed JSON
 tasks; real backends refuse task files still marked `"reviewed": false`.
+
+This review step matters even though the Codex transcript converter removes
+known secret-shaped strings: pattern-based redaction is not a guarantee. A real
+backend sends truncated transcript/task content to the selected provider, while
+`--backend mock` makes no provider calls.
 
 ## Notes / status
 

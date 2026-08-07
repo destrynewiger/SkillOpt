@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
+import tempfile
 
 from skillopt.model import chat_target_messages
 from skillopt.prompts import load_prompt
+from skillopt.envs.spreadsheetbench.executor import generated_code_env
 
 # ── Tool schemas ─────────────────────────────────────────────────────────────
 
@@ -21,13 +25,13 @@ BASH_TOOL_CHAT = {
     "function": {
         "name": "bash",
         "description": (
-            "Execute a bash command and receive stdout+stderr (truncated to 4000 chars). "
-            "Use Python to read / write Excel files."
+            "Run a Python command (python/python3 only) and receive stdout+stderr "
+            "(truncated to 4000 chars)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "cmd": {"type": "string", "description": "Bash command to execute."}
+                "cmd": {"type": "string", "description": "Python command to execute."}
             },
             "required": ["cmd"],
         },
@@ -38,13 +42,13 @@ BASH_TOOL_RESPONSES = {
     "type": "function",
     "name": "bash",
     "description": (
-        "Execute a bash command and receive stdout+stderr (truncated to 4000 chars). "
-        "Use Python to read / write Excel files."
+        "Run a Python command (python/python3 only) and receive stdout+stderr "
+        "(truncated to 4000 chars)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "cmd": {"type": "string", "description": "Bash command to execute."}
+            "cmd": {"type": "string", "description": "Python command to execute."}
         },
         "required": ["cmd"],
     },
@@ -248,18 +252,47 @@ def _auto_verify(work_dir: str) -> str:
         return f"\n\n[AUTO-VERIFY] Could not inspect output: {e}"
 
 
+# Command aliases that the ReAct agent may request. Every accepted alias is
+# resolved to this process's interpreter before execution, so behavior does not
+# depend on PATH and similarly named executables cannot bypass the allow-list.
+_PYTHON_ALIASES = {"python", "python3", "python.exe", "python3.exe"}
+
+
 # ── Bash execution ────────────────────────────────────────────────────────────
 
 def _run_bash(cmd: str, work_dir: str, timeout: int = 60) -> str:
     try:
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=work_dir,
-        )
+        parts = shlex.split(cmd, posix=os.name != "nt")
+        if os.name == "nt":
+            # shlex in non-POSIX mode retains surrounding quotes.
+            parts = [
+                part[1:-1]
+                if len(part) >= 2 and part[0] == part[-1] and part[0] in {'"', "'"}
+                else part
+                for part in parts
+            ]
+        if not parts:
+            return "[error: empty command]"
+        exe_name = parts[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if exe_name not in _PYTHON_ALIASES:
+            return (
+                f"[blocked: '{parts[0]}' not in allow-list "
+                f"{sorted(_PYTHON_ALIASES)}; "
+                "use Python to manipulate spreadsheets]"
+            )
+        parts[0] = sys.executable
+        with tempfile.TemporaryDirectory(
+            prefix="skillopt-generated-", ignore_cleanup_errors=True
+        ) as temp_dir:
+            proc = subprocess.run(
+                parts,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=work_dir,
+                env=generated_code_env(work_dir, temp_dir),
+            )
         out = (proc.stdout + proc.stderr).strip()
     except subprocess.TimeoutExpired:
         return f"[timeout after {timeout}s]"

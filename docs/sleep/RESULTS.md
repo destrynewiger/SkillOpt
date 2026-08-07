@@ -2,8 +2,9 @@
 
 This is the evidence behind SkillOpt-Sleep: does a nightly, offline sleep cycle
 actually make a *deployed* agent better, and is it safe to run unattended? We
-answer with a controlled deployment-scale study — the same protocol the plugin
-runs in production, scored on full held-out test sets.
+answer with a controlled deployment-scale study built from the same shipped
+consolidation and gate components. Its multi-night benchmark recipe is an
+experiment configuration, not the default configuration of the nightly CLI.
 
 ## Setup
 
@@ -11,9 +12,10 @@ runs in production, scored on full held-out test sets.
 **10 new real "today" tasks**; the skill carries over and is refined night to
 night. The full held-out **test** split is scored before night 1 (*baseline*) and
 after night 5 (*after*); **Δ = after − baseline** in percentage points. Optimizer
-model = **GPT-5.5**; single seed (42); every number is produced by the exact
-shipped engine `skillopt_sleep.dream.dream_consolidate` (the experiment harness and
-the plugin cycle call the same function).
+model = **GPT-5.5**; single seed (42). The measurements use the shipped replay,
+consolidation, and gate implementations. The nightly CLI and the checked-in
+benchmark convenience harnesses are separate entry points and do not all call one
+shared wrapper function.
 
 **Benchmarks** (real evaluators, not format heuristics):
 
@@ -106,27 +108,31 @@ Replay-policy ablation (SearchQA, GPT-5.5):
 | Replay policy | Gate-free Δ | Gated Δ |
 |---|---|---|
 | none (tonight's tasks only) | +3.9 | +2.0 |
-| **recall k=10 (shipped default-able)** | +5.1 | +4.4 |
+| **recall k=10 (opt-in experiment)** | +5.1 | +4.4 |
 | cumulative (full history) | +4.8 | +6.0 |
 
 Recall captures most of cumulative's benefit at a fraction of the per-night cost.
 
 ---
 
-## 4. Default hyperparameters are the sweet spot
+## 4. Sensitivity around the experiment recipe
 
 We swept `dream_factor`, `rollouts`, `per_night`, and `nights` on the nano cell
-(SearchQA, gated) to verify the shipped defaults are well-tuned:
+(SearchQA, gated) around the study recipe: `dream_factor=2`, `rollouts=5`,
+`per_night=10`, and `nights=5`. These are **experiment values**, not the shipping
+defaults (`dream_factor=0`, `dream_rollouts=1`, and `recall_k=0`):
 
-| Variant | Δ | vs default (+11.9) |
+| Variant | Δ | vs experiment baseline (+11.9) |
 |---|---|---|
-| dream_factor=4 (default 2) | +8.8 | −3.1 |
-| rollouts=10 (default 5) | +9.5 | −2.4 |
-| per_night=15 (default 10) | +2.7 | −9.2 |
-| nights=8 (default 5) | +9.5 | −2.4 |
+| dream_factor=4 (baseline 2) | +8.8 | −3.1 |
+| rollouts=10 (baseline 5) | +9.5 | −2.4 |
+| per_night=15 (baseline 10) | +2.7 | −9.2 |
+| nights=8 (baseline 5) | +9.5 | −2.4 |
 
-Every direction away from the default hurts. This means users get the best result
-**out of the box** without tuning — the recipe is robust by design.
+Every tested direction away from that baseline reduced the measured gain in this
+cell. The result supports that particular study recipe; it does not establish a
+universal optimum. Shipping stays conservative, and users must opt in to additional
+dream rollouts or recall after considering task quality and provider cost.
 
 ---
 
@@ -143,7 +149,7 @@ gains in Sections 1–2. Measured across an 18-cell deployment sweep (3 benchmar
 |---|---|---|---|---|
 | single-sample reflection (degraded) | −2.66 | **−52.8** | 7 / 18 | 5 / 18 |
 | diverse rollouts (K=5), no recall | +0.24 | −4.0 | 6 / 18 | 7 / 18 |
-| **diverse rollouts + recall (shipped)** | **+0.53** | **−2.4** | 7 / 18 | 7 / 18 |
+| **diverse rollouts + recall (experiment recipe)** | **+0.53** | **−2.4** | 7 / 18 | 7 / 18 |
 
 The catastrophic −52.8 is removed **at its source** by diverse rollouts: the same
 gate-free nano-SearchQA cell goes 0.554 → **0.586 (+2.7)** with no gate at all once
@@ -182,4 +188,4 @@ cross-verify each other's consolidated skills.
 ---
 
 Back to the module overview: [`docs/sleep/README.md`](README.md) ·
-full reference: [Documentation & Reproduction Guide](https://microsoft.github.io/SkillOpt/docs/guideline.html#sleep).
+documentation index: [SkillOpt documentation](../index.md).

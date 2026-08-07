@@ -61,7 +61,12 @@ class ConstantScheduler(LRScheduler):
 
 
 class LinearScheduler(LRScheduler):
-    """Linear decay from ``max_lr`` to ``min_lr`` over ``total_steps``."""
+    """Linear decay from ``max_lr`` to ``min_lr`` over ``total_steps``.
+
+    For multi-step runs, the first call evaluates the first decay interval
+    (``t = 1 / total_steps``) and the ``total_steps``-th call returns
+    ``min_lr``.  Values are rounded to the nearest integer.
+    """
 
     def _compute_lr(self, step: int) -> int:
         if self.total_steps <= 1:
@@ -72,7 +77,12 @@ class LinearScheduler(LRScheduler):
 
 
 class CosineScheduler(LRScheduler):
-    """Cosine annealing from ``max_lr`` to ``min_lr`` over ``total_steps``."""
+    """Cosine annealing from ``max_lr`` to ``min_lr`` over ``total_steps``.
+
+    For multi-step runs, the first call evaluates the first decay interval
+    (``t = 1 / total_steps``) and the ``total_steps``-th call returns
+    ``min_lr``.  Intermediate steps follow a half-cosine curve.
+    """
 
     def _compute_lr(self, step: int) -> int:
         if self.total_steps <= 1:

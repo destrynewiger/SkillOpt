@@ -14,16 +14,18 @@ To add a benchmark you implement four things:
 
 1. **A `SplitDataLoader` subclass** — knows how to load train / val / test
    item dicts from disk.
-2. **A rollout helper** — runs the target model on a batch of items
-   under the current skill and scores each prediction.
+2. **A rollout helper** — runs the target model on a batch of items, scores
+   each prediction, and persists the per-item conversation consumed by the
+   shared reflection stage.
 3. **An `EnvAdapter` subclass** — wires the loader + rollout helper into
-   SkillOpt's lifecycle (`build_*_env`, `rollout`, `reflect`,
-   `get_task_types`).
+   SkillOpt's lifecycle (`build_*_env`, `rollout`, and `get_task_types`).
+   The shared `reflect()` implementation is inherited unless the benchmark
+   needs custom reflection logic.
 4. **A YAML config** — references your env name plus the standard
    train / optimizer / gradient knobs.
 
-Then one line in `scripts/train.py`'s `_register_builtins()` makes it
-discoverable.
+Then lazy registration in the training and evaluation scripts makes it
+discoverable without importing optional dependencies at startup.
 
 ---
 
@@ -99,8 +101,8 @@ def _score(prediction: str, ground_truth: str) -> tuple[int, float]:
     return hard, soft
 
 
-def _rollout_one(item: dict, skill_content: str,
-                 *, max_completion_tokens: int) -> dict:
+def _rollout_one(item: dict, skill_content: str, *, prediction_dir: Path,
+                 max_completion_tokens: int) -> dict:
     system = skill_content
     user = (
         f"Question: {item['question']}\n\n"
@@ -113,14 +115,33 @@ def _rollout_one(item: dict, skill_content: str,
         max_completion_tokens=max_completion_tokens,
     )
     hard, soft = _score(prediction, item.get("ground_truth", ""))
+
+    # EnvAdapter.reflect() reads this exact trajectory path. Keep item IDs
+    # unique and filesystem-safe.
+    task_dir = prediction_dir / str(item["id"])
+    task_dir.mkdir(parents=True, exist_ok=True)
+    conversation = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": prediction},
+    ]
+    (task_dir / "conversation.json").write_text(
+        json.dumps(conversation, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     return {
         "id": str(item["id"]),
         "hard": hard,
         "soft": soft,
         "predicted_answer": prediction,
+        "task_description": item.get("question", ""),
         "question": item.get("question", ""),
         "reference_text": item.get("reference_text", ""),
         "task_type": item.get("task_type", "docfaithful"),
+        "target_system_prompt": system,
+        "target_user_prompt": user,
+        "n_turns": 1,
     }
 
 
@@ -128,15 +149,18 @@ def run_batch(*, items: list[dict], skill_content: str, out_root: str,
               workers: int = 4, max_completion_tokens: int = 4096) -> list[dict]:
     """Run a batch of episodes sequentially or with a thread pool."""
     os.makedirs(out_root, exist_ok=True)
+    prediction_dir = Path(out_root, "predictions")
     # For brevity we go sequentially — swap in concurrent.futures.ThreadPoolExecutor
     # when network / model latency dominates.
     results = [
         _rollout_one(item, skill_content,
+                     prediction_dir=prediction_dir,
                      max_completion_tokens=max_completion_tokens)
         for item in items
     ]
     Path(out_root, "rollouts.json").write_text(
-        json.dumps(results, ensure_ascii=False, indent=2)
+        json.dumps(results, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     return results
 ```
@@ -150,9 +174,17 @@ Two design points worth flagging:
 - **Use `skillopt.model.chat_target`**, not raw OpenAI/Claude calls.
   That routes through whichever **chat** target backend the user
   configured (`openai_chat` / `claude_chat` / `qwen_chat` /
-  `minimax_chat`) without your adapter caring. Exec-style backends
-  (`codex_exec`, `claude_code_exec`) need env-specific rollout code —
-  see `skillopt/envs/swebench/` for an example.
+  `minimax_chat` / `openai_compatible`) without your adapter caring.
+  Exec-style backends (`codex_exec`, `claude_code_exec`) need
+  environment-specific rollout code —
+  see `skillopt/model/codex_harness.py` together with the rollout modules in
+  `skillopt/envs/searchqa/`, `skillopt/envs/docvqa/`, or
+  `skillopt/envs/officeqa/` for working examples.
+- **Persist a conversation for reflection.** The shared `EnvAdapter.reflect()`
+  looks under `<rollout_dir>/predictions/<result-id>/conversation.json` and
+  skips results whose trajectory is absent or empty. Returning `hard`/`soft`
+  scores alone is sufficient for evaluation, but it cannot produce learning
+  patches.
 
 ## Step 4 — Implement the environment adapter
 
@@ -277,9 +309,11 @@ the answer against `item["ground_truth"]`, and returns a list of dicts:
 ]
 ```
 
-The trainer only requires `id`, `hard`, `soft`. The rest is preserved on
-`RolloutResult.extras` (see `skillopt/types.py`) and is what your
-`reflect()` consumes via `run_minibatch_reflect`.
+The trainer requires `id`, `hard`, and `soft` for scoring. The remaining fields
+are preserved on `RolloutResult.extras` (see `skillopt/types.py`). The shared
+reflection implementation combines those fields with each persisted
+`predictions/<id>/conversation.json`; without that file the result is omitted
+from reflection.
 
 ## Step 5 — Register the adapter
 
@@ -294,9 +328,11 @@ and add to `_register_builtins()`:
         pass  # docfaithful deps not installed — skip
 ```
 
-There is **no `BENCHMARK_REGISTRY` dict in `skillopt/envs/__init__.py`** —
-the registry lives in `scripts/train.py` and is populated lazily so that
-optional deps don't break `--help`.
+Mirror the same lazy registration in
+[`scripts/eval_only.py`](https://github.com/microsoft/SkillOpt/blob/main/scripts/eval_only.py)
+so standalone evaluation can resolve the environment too. There is **no
+`BENCHMARK_REGISTRY` dict in `skillopt/envs/__init__.py`**; both entry points
+keep a small lazy registry so optional dependencies do not break `--help`.
 
 ## Step 6 — Create the YAML config
 
@@ -322,9 +358,7 @@ optimizer:
 
 env:
   name: docfaithful
-  # Optional: a seed skill document. Create this file (or any markdown
-  # file) yourself before the first run, or omit the key to let SkillOpt
-  # start from an empty skill.
+  # Point to an existing Markdown file. Use an empty file to start blank.
   skill_init: skillopt/envs/docfaithful/skills/initial.md
   split_mode: split_dir
   split_dir: data/docfaithful_split
@@ -341,7 +375,7 @@ env:
 ## Step 7 — Run
 
 ```bash
-# If you set skill_init above, create the seed skill first:
+# Create the file referenced by env.skill_init before the first run:
 #   mkdir -p skillopt/envs/docfaithful/skills
 #   echo "# DocFaithful initial skill" > skillopt/envs/docfaithful/skills/initial.md
 
@@ -364,8 +398,11 @@ you forgot to implement one of the four abstract methods on `EnvAdapter`:
   `hard` / `soft`.
 - Noisy scoring kills the optimizer. Spend time on `run_batch`'s scoring
   before you spend time on prompts.
+- If training repeatedly reports `skip_no_patches`, first verify that every
+  rollout result has a non-empty
+  `rollout/predictions/<id>/conversation.json` using the same `id` string.
 - If your benchmark needs heavy optional deps (selenium, vllm, ...),
-  wrap the registration block with `try / except ImportError` (Step 5)
+  wrap both registration blocks with `try / except ImportError` (Step 5)
   so people without those deps can still `--help`.
 - Copy `skillopt/envs/_template/` as a starting skeleton — it now
   implements the real abstract methods.

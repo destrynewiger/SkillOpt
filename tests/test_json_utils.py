@@ -5,6 +5,7 @@ import pytest
 
 from skillopt.utils.json_utils import (
     _top_level_brace_objects,
+    _top_level_bracket_arrays,
     extract_json,
     extract_json_array,
 )
@@ -83,6 +84,41 @@ class TestTopLevelBraceObjects:
         """Quoted-prose braces are skipped; a later real object is still found."""
         text = 'note "{wrong: 1}" then actual {"edit": "right"}'
         assert _top_level_brace_objects(text) == ['{"edit": "right"}']
+
+
+class TestTopLevelBracketArrays:
+    """_top_level_bracket_arrays — string/object-aware top-level array scan."""
+
+    def test_single_clean_array(self) -> None:
+        assert _top_level_bracket_arrays("[1, 2]") == ["[1, 2]"]
+
+    def test_two_top_level_arrays(self) -> None:
+        assert _top_level_bracket_arrays("[1]\n[2]") == ["[1]", "[2]"]
+
+    def test_array_inside_object_is_ignored(self) -> None:
+        assert _top_level_bracket_arrays('{"items": [1, 2]}') == []
+
+    def test_bracket_inside_quoted_prose_is_ignored(self) -> None:
+        assert _top_level_bracket_arrays('label is "set it to [x]" done') == []
+
+    def test_unmatched_prose_brace_does_not_hide_later_array(self) -> None:
+        text = "Explanation uses {placeholder, final answer [1, 2]"
+        assert _top_level_bracket_arrays(text) == ["[1, 2]"]
+
+    def test_many_unmatched_braces_scan_linearly(self) -> None:
+        class CountingText(str):
+            def __new__(cls, value: str):
+                instance = super().__new__(cls, value)
+                instance.reads = 0
+                return instance
+
+            def __getitem__(self, key):
+                self.reads += 1
+                return super().__getitem__(key)
+
+        text = CountingText("{" * 1_000 + " final answer [1, 2]")
+        assert _top_level_bracket_arrays(text) == ["[1, 2]"]
+        assert text.reads < len(text) * 4
 
 
 class TestExtractJsonTolerantFallback:
@@ -186,3 +222,19 @@ class TestExtractJsonArray:
         """extract_json_array should not match a bare JSON object."""
         text = '{"this is an object": true}'
         assert extract_json_array(text) is None
+
+    def test_ignores_prose_brackets_before_valid_array(self) -> None:
+        text = "Use [not JSON] as prose. Final answer: [1, 2, 3]"
+        assert extract_json_array(text) == [1, 2, 3]
+
+    def test_multiple_valid_arrays_are_ambiguous(self) -> None:
+        text = "First candidate [1], second candidate [2]"
+        assert extract_json_array(text) is None
+
+    def test_nested_object_array_not_confused_with_array_answer(self) -> None:
+        text = '{"items": [1, 2, 3]}'
+        assert extract_json_array(text) is None
+
+    def test_unmatched_prose_brace_before_valid_array(self) -> None:
+        text = "Explanation uses {placeholder, final answer [1, 2]"
+        assert extract_json_array(text) == [1, 2]

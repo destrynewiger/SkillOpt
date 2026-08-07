@@ -81,12 +81,16 @@ def _hierarchical_merge(
     """Hierarchically merge N patches using the given system prompt.
 
     Same-level batches are executed in PARALLEL via ThreadPoolExecutor.
+    batch_size values < 2 are clamped to 2 so each merge level shrinks
+    (values < 2 cannot make progress). Trainer-level config validation
+    separately enforces merge_batch_size >= 2; this clamp is defense-in-depth.
     """
     if not patches:
         return {"reasoning": "no patches", payload_key(update_mode): []}
     if len(patches) == 1:
         return patches[0]
 
+    batch_size = max(2, batch_size)
     current = list(patches)
     level = 0
     while len(current) > 1:

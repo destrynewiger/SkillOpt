@@ -26,9 +26,16 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+# Progress output uses box-drawing and arrow characters that crash a cp1252
+# console/redirection mid-run; force UTF-8 before any of it is written.
+from skillopt.utils.console import force_utf8_stdout_stderr
+
+force_utf8_stdout_stderr()
+
 from skillopt.model.common import default_model_for_backend, normalize_backend_name
 
 _OPENAI_DEFAULT_MODEL_SENTINELS = {"gpt-5.4", "gpt-5.5"}
+_ROLE_BACKEND_DEFAULTS = (None, "", "openai_chat")
 
 
 # ── Environment registry ────────────────────────────────────────────────────
@@ -137,7 +144,7 @@ def parse_args() -> argparse.Namespace:
     # Legacy flat CLI overrides (still work, prefer --cfg-options for new usage)
     p.add_argument("--env", type=str)
     p.add_argument("--backend", type=str,
-                   choices=["azure_openai", "codex", "codex_exec", "claude", "claude_chat", "claude_code_exec", "qwen", "qwen_chat", "minimax", "minimax_chat"])
+                   choices=["azure_openai", "codex", "codex_exec", "claude", "claude_chat", "claude_code_exec", "cursor", "cursor_exec", "copilot", "copilot_chat", "copilot_exec", "qwen", "qwen_chat", "minimax", "minimax_chat"])
     p.add_argument("--optimizer_model", type=str)
     p.add_argument("--target_model", type=str)
     p.add_argument("--optimizer_backend", type=str)
@@ -205,6 +212,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--claude_code_exec_use_sdk", type=str)
     p.add_argument("--claude_code_exec_effort", type=str)
     p.add_argument("--claude_code_exec_max_thinking_tokens", type=int)
+    p.add_argument("--cursor_exec_path", type=str)
+    p.add_argument("--cursor_exec_sandbox", type=str)
+    p.add_argument("--copilot_exec_path", type=str)
+    p.add_argument("--copilot_exec_home", type=str)
+    p.add_argument("--copilot_exec_allow_all_tools", type=_BOOL)
+    p.add_argument("--copilot_chat_optimizer_model", type=str)
+    p.add_argument("--copilot_chat_target_model", type=str)
+    p.add_argument("--copilot_chat_timeout", type=int)
     p.add_argument("--codex_trace_to_optimizer", type=_BOOL)
     p.add_argument("--skill_init", type=str)
     p.add_argument("--num_epochs", type=int)
@@ -343,6 +358,14 @@ _LEGACY_TO_STRUCTURED: dict[str, str] = {
     "claude_code_exec_use_sdk": "model.claude_code_exec_use_sdk",
     "claude_code_exec_effort": "model.claude_code_exec_effort",
     "claude_code_exec_max_thinking_tokens": "model.claude_code_exec_max_thinking_tokens",
+    "cursor_exec_path": "model.cursor_exec_path",
+    "cursor_exec_sandbox": "model.cursor_exec_sandbox",
+    "copilot_exec_path": "model.copilot_exec_path",
+    "copilot_exec_home": "model.copilot_exec_home",
+    "copilot_exec_allow_all_tools": "model.copilot_exec_allow_all_tools",
+    "copilot_chat_optimizer_model": "model.copilot_chat_optimizer_model",
+    "copilot_chat_target_model": "model.copilot_chat_target_model",
+    "copilot_chat_timeout": "model.copilot_chat_timeout",
     "codex_trace_to_optimizer": "model.codex_trace_to_optimizer",
     "num_epochs": "train.num_epochs",
     "train_size": "train.train_size",
@@ -379,7 +402,64 @@ _LEGACY_TO_STRUCTURED: dict[str, str] = {
 
 def load_config(args: argparse.Namespace) -> dict:
     """Load config with _base_ inheritance, then apply CLI overrides."""
+    import warnings
     from skillopt.config import load_config as _load, flatten_config, is_structured
+
+    # F08: Warn when API keys are supplied on the CLI. Keep the replacement
+    # guidance specific to each backend and, where applicable, each role.
+    _credential_guidance = {
+        "azure_api_key": (
+            "AZURE_OPENAI_API_KEY or "
+            "--azure_openai_auth_mode=managed_identity"
+        ),
+        "azure_openai_api_key": (
+            "AZURE_OPENAI_API_KEY or "
+            "--azure_openai_auth_mode=managed_identity"
+        ),
+        "optimizer_azure_openai_api_key": (
+            "OPTIMIZER_AZURE_OPENAI_API_KEY or "
+            "--optimizer_azure_openai_auth_mode=managed_identity"
+        ),
+        "target_azure_openai_api_key": (
+            "TARGET_AZURE_OPENAI_API_KEY or "
+            "--target_azure_openai_auth_mode=managed_identity"
+        ),
+        "qwen_chat_api_key": "QWEN_CHAT_API_KEY",
+        "optimizer_qwen_chat_api_key": "OPTIMIZER_QWEN_CHAT_API_KEY",
+        "target_qwen_chat_api_key": "TARGET_QWEN_CHAT_API_KEY",
+        "minimax_api_key": "MINIMAX_API_KEY",
+    }
+    for _cli_key, _guidance in _credential_guidance.items():
+        if getattr(args, _cli_key, None):
+            warnings.warn(
+                f"--{_cli_key} is deprecated: provide credentials via "
+                f"{_guidance} instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+    _structured_credential_guidance = dict(_credential_guidance)
+    _structured_credential_guidance.update({
+        # MiniMax is currently configured through one shared runtime client; a
+        # secret supplied through either role-shaped field belongs in the
+        # shared MINIMAX_API_KEY environment variable instead.
+        "optimizer_minimax_api_key": _credential_guidance["minimax_api_key"],
+        "target_minimax_api_key": _credential_guidance["minimax_api_key"],
+    })
+    _credential_suffixes = ("api_key", "api-key", "token", "secret", "password")
+    for _override in getattr(args, "cfg_options", None) or []:
+        _key, _separator, _value = str(_override).partition("=")
+        _key = _key.strip()
+        _leaf = _key.casefold().rsplit(".", 1)[-1]
+        _guidance = _structured_credential_guidance.get(_leaf)
+        if not _guidance and _leaf.endswith(_credential_suffixes):
+            _guidance = "a backend-specific environment variable or managed identity"
+        if _separator and _guidance and _value:
+            warnings.warn(
+                f"--cfg-options {_key}=... exposes a credential in "
+                f"the process command line: provide it via {_guidance} instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     cfg = _load(args.config, overrides=args.cfg_options)
     structured = is_structured(cfg)
@@ -419,6 +499,11 @@ def load_config(args: argparse.Namespace) -> dict:
             if key == "model.backend":
                 explicit_backend = str(option).split("=", 1)[1].strip()
                 break
+    if explicit_backend is None:
+        # ``model.backend`` from a structured YAML file is flattened to
+        # ``model_backend``.  Treat it like the equivalent CLI selection so
+        # its role mapping (and backend-specific model defaults) is applied.
+        explicit_backend = flat.get("model_backend") or flat.get("backend")
 
     backend = normalize_backend_name(flat.get("model_backend") or flat.get("target_backend") or "azure_openai")
 
@@ -434,24 +519,44 @@ def load_config(args: argparse.Namespace) -> dict:
     if explicit_backend is not None:
         backend = normalize_backend_name(explicit_backend)
         flat["model_backend"] = backend
-        if backend in {"claude", "claude_chat"}:
-            flat.setdefault("optimizer_backend", "claude_chat")
-            flat.setdefault("target_backend", "claude_chat")
+
+        def _set_role(key: str, value: str) -> None:
+            if (
+                not _has_model_override(f"model.{key}", key)
+                and flat.get(key) in _ROLE_BACKEND_DEFAULTS
+            ):
+                flat[key] = value
+
+        if backend == "claude_chat":
+            _set_role("optimizer_backend", "claude_chat")
+            _set_role("target_backend", "claude_chat")
         elif backend in {"codex", "codex_exec"}:
-            flat.setdefault("optimizer_backend", "openai_chat")
-            flat.setdefault("target_backend", "codex_exec")
+            _set_role("optimizer_backend", "codex_exec")
+            _set_role("target_backend", "codex_exec")
         elif backend == "claude_code_exec":
-            flat.setdefault("optimizer_backend", "openai_chat")
-            flat.setdefault("target_backend", "claude_code_exec")
-        elif backend in {"qwen", "qwen_chat"}:
-            flat.setdefault("optimizer_backend", "openai_chat")
-            flat.setdefault("target_backend", "qwen_chat")
-        elif backend in {"minimax", "minimax_chat"}:
-            flat.setdefault("optimizer_backend", "openai_chat")
-            flat.setdefault("target_backend", "minimax_chat")
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "claude_code_exec")
+        elif backend == "cursor_exec":
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "cursor_exec")
+        elif backend == "copilot_chat":
+            _set_role("optimizer_backend", "copilot_chat")
+            _set_role("target_backend", "copilot_chat")
+        elif backend == "copilot_exec":
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "copilot_exec")
+        elif backend == "qwen_chat":
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "qwen_chat")
+        elif backend == "minimax_chat":
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "minimax_chat")
+        elif backend == "openai_compatible":
+            _set_role("optimizer_backend", "openai_compatible")
+            _set_role("target_backend", "openai_compatible")
         else:
-            flat.setdefault("optimizer_backend", "openai_chat")
-            flat.setdefault("target_backend", "openai_chat")
+            _set_role("optimizer_backend", "openai_chat")
+            _set_role("target_backend", "openai_chat")
     else:
         flat.setdefault("optimizer_backend", "openai_chat")
         flat.setdefault("target_backend", "openai_chat")
@@ -480,6 +585,19 @@ def load_config(args: argparse.Namespace) -> dict:
             and not _has_model_override("model.target", "target_model")
         ):
             flat["target_model"] = default_model_for_backend("claude_chat")
+    if flat.get("target_backend") == "cursor_exec":
+        if (
+            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override("model.target", "target_model")
+        ):
+            flat["target_model"] = default_model_for_backend("cursor_exec")
+    if flat.get("target_backend") == "copilot_exec":
+        if (
+            str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS
+            and not _has_model_override("model.target", "target_model")
+        ):
+            # Copilot CLI model IDs are independent of Azure deployment names.
+            flat["target_model"] = ""
     if flat.get("target_backend") == "qwen_chat":
         if (
             str(flat.get("target_model", "") or "").strip() in _OPENAI_DEFAULT_MODEL_SENTINELS

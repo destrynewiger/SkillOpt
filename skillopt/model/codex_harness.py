@@ -14,9 +14,14 @@ from typing import Any
 from skillopt.model.backend_config import (
     get_claude_code_exec_config,
     get_codex_exec_config,
+    get_copilot_exec_config,
+    get_cursor_exec_config,
     get_target_backend,
 )
-
+from skillopt.model.copilot_backend import (
+    build_copilot_subprocess_env,
+    parse_copilot_jsonl,
+)
 
 ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -227,6 +232,51 @@ def _build_claude_trace_summary(raw: str, response: str) -> str:
     return "\n".join(parts)
 
 
+def _build_cursor_trace_summary(raw: str, response: str) -> str:
+    model = ""
+    permission_mode = ""
+    session_id = ""
+    duration_ms = 0
+    tool_calls = 0
+    terminal_error = False
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            model = str(event.get("model") or model)
+            permission_mode = str(event.get("permissionMode") or permission_mode)
+            session_id = str(event.get("session_id") or session_id)
+        elif event.get("type") == "tool_call" and event.get("subtype") == "started":
+            tool_calls += 1
+        elif event.get("type") == "result":
+            session_id = str(event.get("session_id") or session_id)
+            try:
+                duration_ms = int(event.get("duration_ms") or 0)
+            except (TypeError, ValueError):
+                duration_ms = 0
+            terminal_error = bool(event.get("is_error")) or event.get("subtype") == "error"
+
+    parts = ["Cursor Agent Trace Summary"]
+    if model:
+        parts.append(f"- model: {model}")
+    if permission_mode:
+        parts.append(f"- permission mode: {permission_mode}")
+    if session_id:
+        parts.append(f"- session id: {session_id}")
+    parts.append(f"- tool calls: {tool_calls}")
+    parts.append(f"- duration ms: {duration_ms}")
+    parts.append(f"- terminal error: {'yes' if terminal_error else 'no'}")
+    parts.append(f"- final response chars: {len(response or '')}")
+    return "\n".join(parts)
+
+
 def _persist_artifacts(
     *,
     work_dir: str,
@@ -268,6 +318,16 @@ def _persist_claude_artifacts(work_dir: str, raw: str, response: str) -> None:
         response=response,
         prefix="claude",
         summary_builder=_build_claude_trace_summary,
+    )
+
+
+def _persist_cursor_artifacts(work_dir: str, raw: str, response: str) -> None:
+    _persist_artifacts(
+        work_dir=work_dir,
+        raw=_sanitize_cursor_trace(raw, preserve_markers=True),
+        response=response,
+        prefix="cursor",
+        summary_builder=_build_cursor_trace_summary,
     )
 
 
@@ -1016,6 +1076,341 @@ def run_codex_exec(
     return last_response, combined
 
 
+_CURSOR_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(cursor_api_key|api[_ -]?key|authorization|bearer|"
+    r"access[_ -]?token|refresh[_ -]?token|token|password)\b"
+    r"(\s*[:=]\s*|\s+)(?:bearer\s+)?([^\s,;]+)"
+)
+_CURSOR_SECRET_TOKEN = re.compile(r"\b(?:sk|key)[_-][A-Za-z0-9_-]{8,}\b")
+_CURSOR_OMITTED_TRACE_FIELDS = {"args", "content", "filetext", "prompt", "result"}
+_CURSOR_SECRET_TRACE_FIELDS = {
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "cursorapikey",
+    "password",
+    "refreshtoken",
+    "secret",
+    "token",
+}
+
+
+def _redact_cursor_error(value: str) -> str:
+    text = _CURSOR_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", value or "")
+    return _CURSOR_SECRET_TOKEN.sub("[REDACTED]", text)
+
+
+def _sanitize_cursor_json(value: Any, *, field: str = "") -> Any:
+    normalized_field = re.sub(r"[^a-z0-9]", "", field.lower())
+    if normalized_field in _CURSOR_OMITTED_TRACE_FIELDS:
+        return "[OMITTED]"
+    if (
+        normalized_field in _CURSOR_SECRET_TRACE_FIELDS
+        or normalized_field.endswith("apikey")
+    ):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_cursor_json(item, field=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_cursor_json(item) for item in value]
+    if isinstance(value, str):
+        return _redact_cursor_error(value)
+    return value
+
+
+def _cursor_process_text(value: str | bytes) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _sanitize_cursor_trace(
+    raw: str | bytes,
+    *,
+    preserve_markers: bool = False,
+) -> str:
+    text = _cursor_process_text(raw)
+    sanitized: list[str] = []
+    in_stderr = False
+    omitted_stdout = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if preserve_markers and stripped.startswith("===== CURSOR CLI ATTEMPT "):
+            in_stderr = False
+            omitted_stdout = False
+            sanitized.append(line)
+            continue
+        if preserve_markers and stripped == "[stderr]":
+            in_stderr = True
+            sanitized.append(line)
+            continue
+        if in_stderr:
+            sanitized.append(_redact_cursor_error(line))
+            continue
+        if stripped.startswith("{"):
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                sanitized.append(
+                    json.dumps(
+                        _sanitize_cursor_json(event),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                continue
+        if not stripped:
+            sanitized.append("")
+        elif not omitted_stdout:
+            sanitized.append("[OMITTED NON-JSON OUTPUT]")
+            omitted_stdout = True
+    return "\n".join(sanitized)
+
+
+def _parse_cursor_terminal(raw: str) -> tuple[str, str]:
+    terminal: dict[str, Any] | None = None
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            terminal = event
+
+    if terminal is None:
+        return "", "Cursor Agent did not emit a terminal result"
+    if terminal.get("is_error") is True or terminal.get("subtype") == "error":
+        detail = str(terminal.get("result") or terminal.get("error") or "unknown error")
+        return "", f"Cursor Agent returned an error result: {_redact_cursor_error(detail)}"
+    result = terminal.get("result")
+    if not isinstance(result, str) or not result.strip():
+        return "", "Cursor Agent returned an empty terminal result"
+    return result.strip(), ""
+
+
+def run_cursor_exec(
+    *,
+    work_dir: str,
+    prompt: str,
+    model: str,
+    timeout: int,
+    images: list[str] | None = None,
+    data_dirs: list[str] | None = None,
+    sandbox: str | None = None,
+    allow_file_edits: bool = False,
+) -> tuple[str, str]:
+    """Run Cursor Agent headlessly as a benchmark target."""
+    config = get_cursor_exec_config()
+    retries = int(config.get("empty_response_retries", 0) or 0)
+    add_dirs = _validated_add_dirs(work_dir, data_dirs, images)[1:]
+    all_raw: list[str] = []
+    last_error = "Cursor Agent returned no response"
+    actual_sandbox = str(sandbox or config["sandbox"])
+    if actual_sandbox not in {"enabled", "disabled"}:
+        raise ValueError("Cursor Agent sandbox must be 'enabled' or 'disabled'")
+    if allow_file_edits and actual_sandbox == "disabled":
+        raise ValueError(
+            "Cursor Agent file-edit rollouts require sandbox='enabled'; "
+            "refusing to combine --force with a disabled sandbox"
+        )
+
+    for attempt in range(retries + 1):
+        attempt_prompt = _exec_prompt(
+            _retry_prompt(prompt, attempt),
+            allow_file_edits=allow_file_edits,
+        )
+        cmd = [
+            str(config["path"]),
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--trust",
+            "--workspace",
+            work_dir,
+            "--sandbox",
+            actual_sandbox,
+        ]
+        if allow_file_edits:
+            cmd.append("--force")
+        else:
+            cmd.extend(["--mode", "ask"])
+        if model:
+            cmd.extend(["--model", model])
+        for path in add_dirs:
+            cmd.extend(["--add-dir", path])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                input=attempt_prompt,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            raw = stdout
+            safe_raw = _sanitize_cursor_trace(raw)
+            if stderr:
+                safe_stderr = _redact_cursor_error(_cursor_process_text(stderr))
+                safe_raw = (
+                    f"{safe_raw}\n[stderr]\n{safe_stderr}"
+                    if safe_raw
+                    else f"[stderr]\n{safe_stderr}"
+                )
+            all_raw.append(f"===== CURSOR CLI ATTEMPT {attempt + 1} =====\n{safe_raw}")
+            _persist_cursor_artifacts(work_dir, "\n\n".join(all_raw), "")
+            raise
+        except OSError as exc:
+            detail = _redact_cursor_error(str(exc))
+            raise RuntimeError(f"Cursor Agent could not be executed: {detail}") from exc
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        raw = stdout
+        safe_raw = _sanitize_cursor_trace(raw)
+        if stderr:
+            safe_stderr = _redact_cursor_error(_cursor_process_text(stderr))
+            safe_raw = (
+                f"{safe_raw}\n[stderr]\n{safe_stderr}"
+                if safe_raw
+                else f"[stderr]\n{safe_stderr}"
+            )
+        all_raw.append(f"===== CURSOR CLI ATTEMPT {attempt + 1} =====\n{safe_raw}")
+        combined = "\n\n".join(all_raw)
+
+        if proc.returncode != 0:
+            _persist_cursor_artifacts(work_dir, combined, "")
+            detail = _redact_cursor_error((stderr or stdout).strip())[:4000]
+            raise RuntimeError(
+                f"Cursor Agent failed with exit code {proc.returncode}: {detail}"
+            )
+
+        response, last_error = _parse_cursor_terminal(stdout)
+        if response:
+            _persist_cursor_artifacts(work_dir, combined, response)
+            return response, combined
+        if last_error.startswith("Cursor Agent returned an error result"):
+            _persist_cursor_artifacts(work_dir, combined, "")
+            raise RuntimeError(last_error)
+
+    combined = "\n\n".join(all_raw)
+    _persist_cursor_artifacts(work_dir, combined, "")
+    raise RuntimeError(last_error)
+
+
+def run_copilot_exec(
+    *,
+    work_dir: str,
+    prompt: str,
+    model: str,
+    timeout: int,
+    images: list[str] | None = None,
+    data_dirs: list[str] | None = None,
+    allow_file_edits: bool = False,
+) -> tuple[str, str]:
+    """Run the GitHub Copilot CLI headlessly as a benchmark target.
+
+    Uses ``copilot -p <prompt> --output-format json`` and parses the emitted
+    JSONL event stream, concatenating ``assistant.message`` content. The plain
+    text / ``--silent`` modes do not reliably stream the response to stdout on
+    every platform, so JSONL is used for robust capture.
+    """
+    config = get_copilot_exec_config()
+    retries = int(config.get("empty_response_retries", 0) or 0)
+    add_dirs = _validated_add_dirs(work_dir, data_dirs, images)[1:]
+    all_raw: list[str] = []
+    last_error = "Copilot CLI returned no response"
+    allow_all_tools = str(config.get("allow_all_tools", "0")) == "1"
+
+    for attempt in range(retries + 1):
+        attempt_prompt = _exec_prompt(
+            _retry_prompt(prompt, attempt),
+            allow_file_edits=allow_file_edits,
+        )
+        cmd = [
+            str(config["path"]),
+            "-p",
+            attempt_prompt,
+            "--output-format",
+            "json",
+            "--stream",
+            "off",
+            "--no-color",
+            "--log-level",
+            "none",
+            "-C",
+            work_dir,
+            "--disable-builtin-mcps",
+            "--no-custom-instructions",
+        ]
+        # Read-only rollouts keep the CLI's approval gate; only opt in to
+        # unattended tool use when the caller explicitly allows file edits and
+        # the operator has enabled it.
+        if allow_file_edits and allow_all_tools:
+            cmd.append("--allow-all-tools")
+        if model:
+            cmd.extend(["--model", model])
+        for path in add_dirs:
+            cmd.extend(["--add-dir", path])
+
+        home = str(config.get("home") or "")
+        env = build_copilot_subprocess_env(home)
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            # Nothing to capture here: all_raw is local and this path re-raises,
+            # and TimeoutExpired already carries .stdout/.stderr for the caller.
+            raise
+        except OSError as exc:
+            raise RuntimeError(f"Copilot CLI could not be executed: {exc}") from exc
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        safe_raw = stdout
+        if stderr:
+            safe_raw = f"{safe_raw}\n[stderr]\n{stderr}" if safe_raw else f"[stderr]\n{stderr}"
+        all_raw.append(f"===== COPILOT CLI ATTEMPT {attempt + 1} =====\n{safe_raw}")
+        combined = "\n\n".join(all_raw)
+
+        if proc.returncode != 0:
+            detail = (stderr or stdout).strip()[:4000]
+            raise RuntimeError(
+                f"Copilot CLI failed with exit code {proc.returncode}: {detail}"
+            )
+
+        response = parse_copilot_jsonl(stdout)
+        if response:
+            return response, combined
+
+    combined = "\n\n".join(all_raw)
+    # Without this the caller gets a bare "returned no response" and no CLI
+    # output at all, since copilot_exec persists no artifacts; include a
+    # bounded tail so an empty/invalid JSONL stream is debuggable.
+    detail = combined.strip()[-4000:]
+    raise RuntimeError(f"{last_error}\n{detail}" if detail else last_error)
+
+
 def run_target_exec(
     *,
     work_dir: str,
@@ -1052,6 +1447,27 @@ def run_target_exec(
             data_dirs=data_dirs,
             allowed_tools=allowed_tools,
             permission_mode=permission_mode,
+            allow_file_edits=allow_file_edits,
+        )
+    if backend == "cursor_exec":
+        return run_cursor_exec(
+            work_dir=work_dir,
+            prompt=prompt,
+            model=model,
+            timeout=timeout,
+            images=images,
+            data_dirs=data_dirs,
+            sandbox=sandbox,
+            allow_file_edits=allow_file_edits,
+        )
+    if backend == "copilot_exec":
+        return run_copilot_exec(
+            work_dir=work_dir,
+            prompt=prompt,
+            model=model,
+            timeout=timeout,
+            images=images,
+            data_dirs=data_dirs,
             allow_file_edits=allow_file_edits,
         )
     raise ValueError(f"Unsupported exec backend: {backend}")

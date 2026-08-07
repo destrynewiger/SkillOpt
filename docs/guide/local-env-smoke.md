@@ -35,9 +35,14 @@ Use the split names your adapter maps to SkillOpt phases:
 - `val` or `valid_seen` for selection/gating
 - `test` or `valid_unseen` for final evaluation
 
-## 2. Support an offline mock mode
+## 2. Support a genuinely offline mock mode
 
-Add a configuration flag such as `mock: true` to your adapter. In mock mode, `rollout()` should return deterministic responses without calling external model APIs.
+Add a configuration flag such as `mock: true` to your adapter. In mock mode,
+`rollout()` should return deterministic responses without calling external
+model APIs. The inherited `EnvAdapter.reflect()` does call the configured
+optimizer backend, so a no-credential smoke test must also override
+`reflect()` in mock mode to return a small, schema-valid deterministic patch
+(and delegate to `super().reflect(...)` otherwise).
 
 This lets you verify the SkillOpt loop with a fast command such as:
 
@@ -46,13 +51,14 @@ python scripts/train.py \
   --config configs/myenv/tiny_mock.yaml
 ```
 
-Mock mode should still write the same artifacts as a real run, for example:
+Mock mode should still exercise the trainer's normal artifact paths, including:
 
-- `responses.json`
-- `rollout_results.json`
-- `ranked_edits.json`
-- `candidate_skill.md`
-- `summary.json`
+- `config.json`, `runtime_state.json`, and `history.json`
+- `skills/skill_vXXXX.md`
+- `steps/step_XXXX/ranked_edits.json`
+- `steps/step_XXXX/candidate_skill.md`
+- `steps/step_XXXX/step_record.json`
+- the final `summary.json`
 
 ## 3. Keep the smoke config tiny
 
@@ -127,7 +133,7 @@ For the real tiny run, verify that:
 
 - the run completes
 - `summary.json` is written
-- `ranked_edits.json` contains the expected ranking metadata
+- the step directory's `ranked_edits.json` contains the expected ranking metadata
 - any optimizer bridge log marks the response schema as valid
 - no generated files are written outside `out_root`
 

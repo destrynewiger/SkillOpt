@@ -14,10 +14,9 @@ SkillOpt is designed around a core insight: **optimizing natural-language prompt
 | **Gradient aggregation** | Patch aggregation | Merge similar edits |
 | **Gradient clipping** | Edit selection | Cap max edits per step |
 | **Learning rate** | `learning_rate` | Max number of edits applied per step |
-| **LR scheduler** | `lr_scheduler` | Decay schedule: cosine, linear, constant |
+| **LR scheduler** | `lr_scheduler` | Edit-budget schedule: cosine, linear, constant, or autonomous |
 | **SGD step** | Skill update | Apply selected patches to document |
 | **Validation set** | Selection split | Gate checks improvement before accepting |
-| **Early stopping** | Gate patience | Reject updates that don't improve |
 | **Training step** | Step | One rollout → reflect → update cycle |
 | **Epoch** | Epoch | Full pass with slow update + meta memory |
 | **Momentum** | Slow update | Longitudinal comparison at epoch boundary |
@@ -34,7 +33,10 @@ SkillOpt is designed around a core insight: **optimizing natural-language prompt
 
 1. **Familiar mental model**: ML practitioners immediately understand how to tune SkillOpt
 2. **Principled hyperparameter search**: Grid search over `learning_rate` × `lr_scheduler` works just like in DL
-3. **Proven mechanisms**: Gating ≈ validation-based selection, patience ≈ early stopping, slow update ≈ momentum — all with strong theoretical motivation
+3. **Reusable mechanisms**: Gating provides validation-based model selection, while slow update plays a momentum-like role across epochs
+
+The gate is a per-candidate accept/reject decision. SkillOpt does not implement
+a gate-patience counter or stop training after a run of rejected candidates.
 
 ## Hyperparameter Transfer Rules
 

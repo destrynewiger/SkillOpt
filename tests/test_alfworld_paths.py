@@ -9,7 +9,7 @@ def test_resolve_alfworld_gamefile_uses_alfworld_data_for_relative_paths(monkeyp
 
     resolved = _resolve_alfworld_gamefile("json_2.1.1/valid_seen/task/game.tw-pddl")
 
-    assert resolved == os.path.join(str(data_root), "json_2.1.1/valid_seen/task/game.tw-pddl")
+    assert resolved == os.path.normpath(os.path.join(str(data_root), "json_2.1.1/valid_seen/task/game.tw-pddl"))
 
 
 def test_resolve_alfworld_gamefile_keeps_absolute_paths(monkeypatch, tmp_path):

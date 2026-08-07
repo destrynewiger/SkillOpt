@@ -866,5 +866,12 @@
     "no": 37,
     "paper_link": "http://arxiv.org/abs/2602.08644v1",
     "source_file": "data/202602/qa_202602_final.json"
+  },
+  {
+    "id": "202512:46",
+    "month": "202512",
+    "no": 46,
+    "paper_link": "http://arxiv.org/abs/2512.05945v1",
+    "source_file": "data/202512/qa_202512_final.json"
   }
 ]

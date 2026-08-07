@@ -18,6 +18,19 @@ hide:
 
 ---
 
+## Two Complementary Workflows
+
+| Workflow | Package / command | Use it for |
+|---|---|---|
+| **Research engine** | `skillopt`, `skillopt-train`, `skillopt-eval` | Train and evaluate skill documents on explicit benchmark splits. |
+| **SkillOpt-Sleep (preview)** | `skillopt_sleep`, `skillopt-sleep` | Review supported coding-agent sessions and stage proposed memory/skill updates for human adoption. |
+
+They share the idea of bounded text updates and validation, but they are
+separate entry points with different configs and safety boundaries. Start with
+the [SkillOpt-Sleep overview](sleep/README.md) before using real session data.
+
+---
+
 ## How It Works
 
 <div class="pipeline-container" markdown>
@@ -106,29 +119,52 @@ SkillOpt brings the familiar deep-learning training paradigm to agentic prompt o
 | **ALFWorld** | Embodied AI | `configs/alfworld/` |
 | **OfficeQA** | Enterprise QA | `configs/officeqa/` |
 | **SearchQA** | Open-domain QA | `configs/searchqa/` |
-| **LiveMathBench** | Math reasoning | `configs/livemathematicianbench/` |
-| **SWEBench** | Software Engineering | `configs/swebench/` |
-| + 5 more | Various | See [docs](guide/first-experiment.md) |
+| **LiveMathematicianBench** | Math reasoning | `configs/livemathematicianbench/` |
+| **SpreadsheetBench** | Spreadsheet editing | `configs/spreadsheetbench/` |
+
+---
+
+## Model Backends
+
+Optimizer and target roles are configured separately. Chat backends include
+Azure OpenAI (`openai_chat`), the provider-neutral
+`openai_compatible` backend, the Claude Code CLI (`claude_chat`), Qwen, and
+MiniMax. Codex and Claude Code exec harnesses are target-only and require
+adapter support. Despite its name, `claude_chat` launches `claude -p`; it is
+not a direct Anthropic API client.
+
+If a provider implements OpenAI Chat Completions, begin with the
+[built-in compatible backend](guide/new-backend.md#built-in-the-generic-openai-compatible-backend)
+instead of adding a new integration. See [Configuration](guide/configuration.md)
+for authentication and per-role overrides.
 
 ---
 
 ## Quick Example
 
 ```bash
-# Install
-pip install -e .
+# Clone and install the research checkout plus the SearchQA data extra
+git clone https://github.com/microsoft/SkillOpt.git
+cd SkillOpt
+python -m pip install -e ".[searchqa]"
 
-# Configure credentials
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-export AZURE_OPENAI_API_KEY="your-key"
+# Configure credentials (choose one auth mode in .env)
+cp .env.example .env
+set -a; source .env; set +a
 
-# Train on SearchQA
-python scripts/train.py --config configs/searchqa/default.yaml
+# Materialize the runnable split from the checked-in ID manifest
+python scripts/materialize_searchqa.py
+
+# Train on SearchQA into a predictable output directory
+python scripts/train.py \
+  --config configs/searchqa/default.yaml \
+  --out_root outputs/searchqa_quickstart
 
 # Evaluate best skill
 python scripts/eval_only.py \
   --config configs/searchqa/default.yaml \
-  --skill outputs/best_skill.md
+  --skill outputs/searchqa_quickstart/best_skill.md \
+  --split valid_unseen
 ```
 
 ---
@@ -166,5 +202,14 @@ python scripts/eval_only.py \
     Configure, launch, and monitor training from your browser.
 
     [:octicons-arrow-right-24: WebUI Guide](guide/first-experiment.md#webui)
+
+-   :material-weather-night:{ .lg .middle } **SkillOpt-Sleep**
+
+    ---
+
+    Test the deployment companion with the no-provider mock path, then review
+    its data boundary before selecting a real backend.
+
+    [:octicons-arrow-right-24: Sleep Overview](sleep/README.md)
 
 </div>

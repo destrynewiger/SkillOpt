@@ -1,19 +1,7 @@
 """SkillOpt-Sleep — built-in nightly scheduler.
 
-Installs/removes a crontab entry that runs the sleep cycle automatically, so the
-user doesn't have to wire cron themselves. Idempotent: a managed block delimited
-by marker comments is added/replaced/removed in the user's crontab.
-
-Design choices:
-  * Off-:00 minute (3:17 local by default) so many users don't all hit the API
-    at the same instant.
-  * The entry runs `python -m skillopt_sleep run` for a specific project and
-    appends to <project>/.skillopt-sleep/cron.log.
-  * `schedule` is additive per project (keyed by project path); `unschedule`
-    removes the project's line (or the whole managed block with --all).
-
-cron is the portable mechanism on Linux/macOS. On systems without `crontab`,
-`schedule` prints the line and instructions instead of failing.
+Installs/removes a crontab entry (on Unix) or a Scheduled Task (on Windows) that
+runs the sleep cycle automatically, so the user doesn't have to wire it manually.
 """
 from __future__ import annotations
 
@@ -65,12 +53,74 @@ def _split_managed(crontab: str) -> Tuple[str, List[str]]:
     return "\n".join(outside).rstrip(), managed
 
 
+def _have_schtasks() -> bool:
+    return shutil.which("schtasks") is not None
+
+
+def _win_task_name(project: str) -> str:
+    project = os.path.abspath(project)
+    safe = project.replace(":\\", "_").replace("\\", "_").replace("/", "_").replace(" ", "_")
+    return f"SkillOpt-Sleep-{safe}"
+
+
+def _create_win_task(task_name: str, command: str, hour: int, minute: int) -> bool:
+    try:
+        st = f"{hour:02d}:{minute:02d}"
+        cmd = ["schtasks", "/create", "/tn", task_name, "/tr", command, "/sc", "daily", "/st", st, "/f"]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _delete_win_task(task_name: str) -> bool:
+    try:
+        cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _list_win_tasks() -> List[str]:
+    try:
+        proc = subprocess.run(["schtasks", "/query", "/fo", "csv"], capture_output=True, text=True)
+        if proc.returncode != 0:
+            return []
+        tasks = []
+        for line in proc.stdout.splitlines():
+            if not line.startswith('"'):
+                continue
+            parts = line.split(",")
+            if len(parts) > 0:
+                name = parts[0].strip('"')
+                if name.startswith("SkillOpt-Sleep-"):
+                    tasks.append(name)
+        return tasks
+    except Exception:
+        return []
+
+
 def _runner_cmd(project: str, backend: str, extra: str, python: str) -> str:
     logdir = os.path.join(project, ".skillopt-sleep")
     log = os.path.join(logdir, "cron.log")
-    # use absolute python + -m so cron's minimal env still works
-    cmd = (f'{python} -m skillopt_sleep run --project "{project}" '
+    # use absolute python + -m so cron's/scheduler's minimal env still works
+    cmd = (f'"{python}" -m skillopt_sleep run --project "{project}" '
            f'--scope invoked --backend {backend} {extra}'.rstrip())
+    if sys.platform == "win32":
+        helper_script = os.path.join(logdir, "run.cmd")
+        try:
+            os.makedirs(logdir, exist_ok=True)
+            content = (
+                "@echo off\n"
+                f'cd /d "{_repo_root()}"\n'
+                f'{cmd} >> "{log}" 2>&1\n'
+            )
+            with open(helper_script, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception:
+            pass
+        return f'"{helper_script}"'
     return f'mkdir -p "{logdir}"; cd "{_repo_root()}" && {cmd} >> "{log}" 2>&1'
 
 
@@ -87,12 +137,26 @@ def schedule(project: str, *, backend: str = "mock", hour: int = 3, minute: int 
              extra: str = "", python: Optional[str] = None) -> Tuple[bool, str]:
     """Install (or replace) the nightly entry for ``project``.
 
-    Returns (installed, message). If crontab is unavailable, installed=False and
-    the message contains the line to add manually.
+    Returns (installed, message). If the scheduler backend is unavailable, installed=False and
+    the message contains instructions to add manually.
     """
     project = os.path.abspath(project)
     python = python or sys.executable or "python3"
-    cron_line = f"{minute} {hour} * * *  {_runner_cmd(project, backend, extra, python)}  {_project_marker(project)}"
+    runner_cmd = _runner_cmd(project, backend, extra, python)
+
+    if sys.platform == "win32":
+        if not _have_schtasks():
+            return False, "schtasks.exe not found on this system. Add this command to your scheduler manually:\n" + runner_cmd
+        tn = _win_task_name(project)
+        ok = _create_win_task(tn, runner_cmd, hour, minute)
+        if ok:
+            return True, (f"Scheduled nightly at {hour:02d}:{minute:02d} for {project} "
+                          f"(backend={backend}) via Windows Task Scheduler. Task Name: {tn}\n"
+                          f"Logs -> {project}/.skillopt-sleep/cron.log\n"
+                          f"Runs `skillopt_sleep run`; it only STAGES a proposal — adopt is still manual.")
+        return False, f"Failed to write scheduled task. Command to run manually:\nschtasks /create /tn \"{tn}\" /tr \"{runner_cmd}\" /sc daily /st {hour:02d}:{minute:02d} /f"
+
+    cron_line = f"{minute} {hour} * * *  {runner_cmd}  {_project_marker(project)}"
 
     if not _have_crontab():
         return False, ("crontab not found on this system. Add this line to your "
@@ -116,6 +180,29 @@ def schedule(project: str, *, backend: str = "mock", hour: int = 3, minute: int 
 
 def unschedule(project: Optional[str] = None, *, all_projects: bool = False) -> Tuple[bool, str]:
     """Remove the entry for ``project`` (or the whole managed block with all_projects)."""
+    if sys.platform == "win32":
+        if not _have_schtasks():
+            return False, "schtasks.exe not found on this system."
+        if all_projects:
+            tasks = _list_win_tasks()
+            ok = True
+            for t in tasks:
+                if not _delete_win_task(t):
+                    ok = False
+            return ok, ("Removed all scheduled tasks." if ok else "Failed to remove some tasks.")
+        elif project:
+            tn = _win_task_name(project)
+            ok = _delete_win_task(tn)
+            try:
+                logdir = os.path.join(project, ".skillopt-sleep")
+                helper = os.path.join(logdir, "run.cmd")
+                if os.path.exists(helper):
+                    os.remove(helper)
+            except Exception:
+                pass
+            return ok, ("Removed." if ok else "Failed to remove scheduled task (does it exist?).")
+        return False, "No project specified to unschedule."
+
     if not _have_crontab():
         return False, "crontab not found; nothing to remove."
     outside, managed = _split_managed(_read_crontab())
@@ -134,5 +221,9 @@ def unschedule(project: Optional[str] = None, *, all_projects: bool = False) -> 
 
 
 def list_scheduled() -> List[str]:
+    if sys.platform == "win32":
+        if not _have_schtasks():
+            return []
+        return _list_win_tasks()
     _outside, managed = _split_managed(_read_crontab())
     return [ln for ln in managed if ln.strip()]

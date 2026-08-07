@@ -12,11 +12,12 @@ import uuid
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from skillopt.model.backend_config import get_codex_exec_config
 from skillopt.model.common import (
     CompatAssistantMessage,
     CompatToolCall,
     CompatToolFunction,
-    tracker,
+    TokenTracker,
 )
 
 
@@ -28,6 +29,7 @@ OPTIMIZER_DEPLOYMENT = os.environ.get("OPTIMIZER_DEPLOYMENT", "gpt-4o")
 TARGET_DEPLOYMENT = os.environ.get("TARGET_DEPLOYMENT", "gpt-4o")
 
 REASONING_EFFORT: str | None = None
+tracker = TokenTracker()
 
 
 def _default_working_directory() -> str:
@@ -286,20 +288,21 @@ def _run_codex_exec(
     timeout: int | None,
 ) -> tuple[str, dict[str, int]]:
     with tempfile.TemporaryDirectory(prefix="skillopt_codex_") as temp_dir:
+        config = get_codex_exec_config()
         output_path = os.path.join(temp_dir, "last_message.txt")
         image_paths = _materialize_attachments(attachments, temp_dir)
+        profile = str(config.get("profile") or os.environ.get("CODEX_PROFILE", "")).strip()
+        reasoning_effort = str(REASONING_EFFORT or config.get("reasoning_effort") or "").strip()
 
         command = [
-            CODEX_BIN,
+            str(config.get("path") or CODEX_BIN),
             "exec",
             "--json",
             "--ephemeral",
-            "--profile",
-            CODEX_PROFILE,
             "-c",
-            "approval_policy=\"never\"",
+            f"approval_policy={json.dumps(str(config.get('approval_policy') or 'never'))}",
             "--sandbox",
-            CODEX_SANDBOX_MODE,
+            str(config.get("sandbox") or CODEX_SANDBOX_MODE),
             "--skip-git-repo-check",
             "--cd",
             _default_working_directory(),
@@ -309,8 +312,11 @@ def _run_codex_exec(
             output_path,
         ]
 
-        if REASONING_EFFORT:
-            command.extend(["-c", f"model_reasoning_effort={json.dumps(REASONING_EFFORT)}"])
+        if profile:
+            command.extend(["--profile", profile])
+
+        if reasoning_effort and reasoning_effort != "none":
+            command.extend(["-c", f"model_reasoning_effort={json.dumps(reasoning_effort)}"])
 
         schema_path = None
         if output_schema is not None:

@@ -17,7 +17,9 @@ browse [`skillopt/envs/`](https://github.com/microsoft/SkillOpt/tree/main/skillo
 
 `skillopt/envs/base.py` — abstract adapter that connects the SkillOpt
 trainer to an environment (benchmark, simulator, REST API, ...).
-Subclasses **must** implement the five abstract methods below.
+Subclasses **must** implement the four abstract methods below. Reflection has a
+shared default implementation and only needs to be overridden for
+environment-specific behavior.
 
 ```python
 from abc import ABC, abstractmethod
@@ -30,6 +32,10 @@ class EnvAdapter(ABC):
     def setup(self, cfg: dict) -> None: ...
     def get_dataloader(self) -> BaseDataLoader | None: ...
     def requires_ray(self) -> bool: ...                 # default False
+    def reflect(self, results: list[dict], skill_content: str,
+                out_dir: str, **kwargs) -> list[dict | None]:
+        """Delegate to the shared minibatch reflection pipeline."""
+        ...
 
     # ── Abstract methods (subclasses MUST implement) ────────────────────
 
@@ -54,25 +60,20 @@ class EnvAdapter(ABC):
         """
 
     @abstractmethod
-    def reflect(self, results: list[dict], skill_content: str,
-                out_dir: str, **kwargs) -> list[dict | None]:
-        """Turn rollout results into a list of raw patch dicts.
-
-        Each dict (or None to drop the slot) MUST contain:
-          - "patch":       {"edits": [...]}     a Patch.to_dict() payload
-          - "source_type": "failure" | "success"
-        """
-
-    @abstractmethod
     def get_task_types(self) -> list[str]:
         """Distinct task-type strings used for stratified sampling."""
 ```
 
-The trainer also calls a few default-implemented helpers on every adapter:
+The default `reflect()` delegates to `run_minibatch_reflect` and returns raw
+patch dicts with a `patch` payload plus a `failure` or `success` source type.
+It expects each rollout to persist a non-empty trajectory at
+`<rollout_dir>/predictions/<result-id>/conversation.json`; results without that
+file can be scored but are skipped during reflection.
+The trainer also calls several default-implemented helpers on every adapter:
 `build_reference_text`, `get_reference_metadata`, `attach_reference_context`,
 `select_representative_items`, and `build_env_from_batch`. Read the docstrings
 in `skillopt/envs/base.py` if you need to override any of these — most
-benchmarks don't.
+benchmarks do not.
 
 ### `BaseDataLoader` / `SplitDataLoader`
 
@@ -161,16 +162,17 @@ into `RolloutResult.extras`.
 ### `GateResult` / `GateAction`
 
 `skillopt/evaluation/gate.py` — the validation-gate decision types
-returned each epoch.
+returned for each candidate optimization step, and optionally for a separate
+epoch-end slow-update candidate.
 
 ---
 
 ## Registering an environment
 
 Environments are not registered via decorators or a `BENCHMARK_REGISTRY`
-dict. The trainer keeps a lazy registry inside `scripts/train.py` —
-`_ENV_REGISTRY` — populated by `_register_builtins()`. To add a new env
-you append a `try / except ImportError` block there. See
+dict. The training and standalone-evaluation entry points each keep a lazy
+`_ENV_REGISTRY`, populated by `_register_builtins()` in `scripts/train.py` and
+`scripts/eval_only.py`. Add the environment to both entry points. See
 [Add a New Benchmark](../guide/new-benchmark.md) for the full step-by-step.
 
 ---
@@ -187,8 +189,12 @@ not via a base class subclass. Supported values (as of this writing):
 | `claude_chat` | ✓ | ✓ |
 | `qwen_chat` | ✓ | ✓ |
 | `minimax_chat` | ✓ | ✓ |
-| `codex_exec` | — | ✓ |
+| `copilot_chat` | ✓ | ✓ |
+| `openai_compatible` | ✓ | ✓ |
+| `codex_exec` | ✓ | ✓ |
 | `claude_code_exec` | — | ✓ |
+| `cursor_exec` | — | ✓ |
+| `copilot_exec` | — | ✓ |
 
 See `skillopt/model/backend_config.py` for the live whitelist and
 [`docs/reference/config.md`](./config.md) for the per-backend

@@ -11,12 +11,12 @@ BatchSpec              — from skillopt.datasets.base
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields as dc_fields
+from dataclasses import dataclass, field
+from dataclasses import fields as dc_fields
 from typing import Any, Literal
 
-from skillopt.evaluation.gate import GateAction, GateResult  # noqa: F401
 from skillopt.datasets.base import BatchSpec  # noqa: F401
-
+from skillopt.evaluation.gate import GateAction, GateResult  # noqa: F401
 
 # ── Atomic types ─────────────────────────────────────────────────────────
 
@@ -109,7 +109,7 @@ class RolloutResult:
     """
 
     id: str
-    hard: int
+    hard: float
     soft: float
     n_turns: int = 0
     fail_reason: str = ""
@@ -142,7 +142,7 @@ class RolloutResult:
         extras = {k: v for k, v in d.items() if k not in known}
         return cls(
             id=str(d.get("id", "")),
-            hard=int(d.get("hard", 0)),
+            hard=float(d.get("hard", 0)),
             soft=float(d.get("soft", 0.0)),
             n_turns=int(d.get("n_turns", 0)),
             fail_reason=str(d.get("fail_reason", "")),

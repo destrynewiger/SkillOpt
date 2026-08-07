@@ -28,13 +28,16 @@ This directory provides scaffold files for adding a new benchmark to SkillOpt.
    `TemplateBenchmarkLoader → YourBenchmarkLoader`)
    and fix the cross-import in `adapter.py`.
 3. **Implement the TODO blocks** inside `adapter.py:rollout` and the
-   `_normalize_item` helper in `dataloader.py`. (`reflect` is inherited from
-   `EnvAdapter`; override it only for custom reflection logic.)
-4. **Register** the adapter — add a `try / except ImportError` block in
-   `scripts/train.py`'s `_register_builtins()` mapping the registry key
-   to your `YourBenchmarkAdapter` class. There is no
-   `BENCHMARK_REGISTRY` dict in `skillopt/envs/__init__.py`; the live
-   registry is `_ENV_REGISTRY` in `scripts/train.py`.
+   `_normalize_item` helper in `dataloader.py`. In addition to returning
+   `id`/`hard`/`soft`, persist each non-empty trajectory at
+   `<out_dir>/predictions/<id>/conversation.json`; the inherited `reflect`
+   method reads those files. Override `reflect` only for custom reflection
+   logic.
+4. **Register** the adapter — add matching `try / except ImportError` blocks
+   to `_register_builtins()` in both `scripts/train.py` and
+   `scripts/eval_only.py`, mapping the registry key to your
+   `YourBenchmarkAdapter` class. There is no `BENCHMARK_REGISTRY` dict in
+   `skillopt/envs/__init__.py`; each CLI keeps its own lazy `_ENV_REGISTRY`.
 5. **Create the config** at `configs/your_benchmark/default.yaml`
    (start from `config_template.yaml`). `_base_` is a **string path**,
    not a list.

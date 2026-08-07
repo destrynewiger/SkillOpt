@@ -24,6 +24,17 @@ model:
   claude_code_exec_use_sdk: auto
   claude_code_exec_effort: medium
   claude_code_exec_max_thinking_tokens: 16384
+  cursor_exec_path: ""       # blank uses CURSOR_EXEC_PATH or cursor-agent
+  cursor_exec_sandbox: ""    # blank uses CURSOR_EXEC_SANDBOX or enabled
+  # GitHub Copilot CLI. `--backend copilot` selects copilot_chat for BOTH roles,
+  # using CLI authentication rather than a separate provider API key.
+  copilot_exec_path: ""              # blank uses COPILOT_EXEC_PATH or copilot
+  copilot_exec_home: ""              # blank leaves COPILOT_HOME untouched
+  # null preserves COPILOT_EXEC_ALLOW_ALL_TOOLS (default off); copilot_exec only
+  copilot_exec_allow_all_tools: null  # required for file-edit rollouts
+  copilot_chat_optimizer_model: ""   # blank lets the CLI pick its default model
+  copilot_chat_target_model: ""
+  copilot_chat_timeout: null         # preserves COPILOT_CHAT_TIMEOUT or the built-in default
   codex_trace_to_optimizer: true
   azure_openai_endpoint: ""           # e.g. "https://your-resource.openai.azure.com/"
   azure_openai_api_version: "2024-12-01-preview"

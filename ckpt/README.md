@@ -10,9 +10,10 @@ provided skills on a given split without re-running the training loop.
 > skills as portable artifacts. If you want to *train* your own skill,
 > use `scripts/train.py` per the top-level README.
 >
-> This is the first artifact batch. We plan to continue uploading the
-> remaining optimized skills and benchmark split manifests as they are
-> cleaned and verified.
+> This is the first optimized-skill artifact batch. We plan to continue
+> uploading remaining paper artifacts as they are cleaned and verified. All
+> six lightweight ID/path split manifests are already checked in under
+> `data/`; most still require materializing their upstream benchmark payload.
 
 ## What's here
 
@@ -35,12 +36,17 @@ longitudinal guidance — that's expected, not a formatting issue.
 invoking the optimizer. Example for SearchQA against the test split:
 
 ```bash
+# The checked-in SearchQA split is ID-only; materialize full examples first.
+python -m pip install -e ".[searchqa]"
+python scripts/materialize_searchqa.py
+
 python scripts/eval_only.py \
   --config configs/searchqa/default.yaml \
   --skill ckpt/searchqa/gpt5.5_skill.md \
   --split valid_unseen \
-  --split_dir data/searchqa_id_split \
+  --split_dir data/searchqa_split \
   --azure_openai_endpoint https://your-resource.openai.azure.com/ \
+  --azure_openai_auth_mode api_key \
   --target_model gpt-5.5
 ```
 
@@ -52,13 +58,16 @@ is the selection / validation split, `train` is the training split, and
 ## On comparing to the paper numbers
 
 To compare against the paper-reported cells, use the same dataset split and
-scorer. SearchQA's split is checked in at `data/searchqa_id_split/` (400
-train / 200 selection / 1400 test). For the other benchmarks, point
-`--split_dir` at your own materialized split; the loader is deterministic
-from `split_seed` (default `42`) + `split_ratio` (default `2:1:7`) when
-`split_mode: ratio` is used, so a given `data_path` + seed reproduces
-across machines. Explicit per-benchmark split manifests are being prepared
-for upload — see issues #14 and #21.
+scorer. SearchQA's ID manifest is checked in at `data/searchqa_id_split/` (400
+train / 200 selection / 1400 test); the materializer writes the runnable
+payload to `data/searchqa_split/`. All six lightweight split manifests are
+checked in under `data/`. ALFWorld's manifest records game-file paths; the
+other ID manifests still require you to materialize the corresponding
+upstream benchmark payload into the documented `split_dir`. See
+[`data/README.md`](../data/README.md) for the exact status of each benchmark.
+When using `split_mode: ratio` instead, the loader is deterministic from
+`split_seed` (default `42`) + `split_ratio` (default `2:1:7`), so a given
+`data_path` + seed reproduces across machines.
 
 ## Why force-accept vs. gated slow-update matters
 
@@ -74,6 +83,5 @@ Current `main` defaults to `false` (force-accept mode), a newer
 post-submission behavior where the slow-update guidance is written into
 `current_skill` and `best_skill` unconditionally at the epoch boundary. If
 you re-train with the current default, you may produce a *different*
-`best_skill.md` than the one checked in here. Both modes are supported;
-see the top-level README's "Configuration -> Slow-update acceptance mode"
-section.
+`best_skill.md` than the one checked in here. Both modes are supported; see
+the [configuration reference](../docs/reference/config.md).

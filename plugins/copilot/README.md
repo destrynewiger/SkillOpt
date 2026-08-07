@@ -27,8 +27,8 @@ Requires Python ≥ 3.10. No third-party packages — the server is pure stdlib.
      "mcpServers": {
        "skillopt-sleep": {
          "command": "python3",
-         "args": ["/abs/path/SkillOpt-Sleep/plugins/copilot/mcp_server.py"],
-         "env": { "SKILLOPT_SLEEP_REPO": "/abs/path/SkillOpt-Sleep" }
+        "args": ["/abs/path/SkillOpt/plugins/copilot/mcp_server.py"],
+        "env": { "SKILLOPT_SLEEP_REPO": "/abs/path/SkillOpt" }
        }
      }
    }
@@ -42,13 +42,20 @@ Requires Python ≥ 3.10. No third-party packages — the server is pure stdlib.
 ## Use
 
 Ask Copilot things like *"run the sleep cycle"*, *"what did the last sleep
-propose?"*, *"adopt the staged sleep proposal"*. Copilot calls the MCP tools:
-`sleep_status`, `sleep_dry_run`, `sleep_run`, `sleep_adopt`, `sleep_harvest`.
+propose?"*, *"adopt the staged sleep proposal"*. The server exposes seven MCP
+tools: `sleep_status`, `sleep_dry_run`, `sleep_run`, `sleep_adopt`,
+`sleep_harvest`, `sleep_schedule`, and `sleep_unschedule`.
 
 Each tool takes optional `project`, `backend` (`mock`/`claude`/`codex`/`copilot`), and
 `scope` arguments. Default backend is `mock` (no API spend). The `copilot`
 backend drives the GitHub Copilot CLI (`copilot -p ... --output-format json`)
 and requires the `copilot` CLI to be installed and authenticated.
+
+Harvesting is local and read-only, and the default `mock` backend makes no
+provider calls. A real backend sends truncated transcript excerpts and derived
+tasks to the selected provider. Outbound prompts are not currently guaranteed
+to be secret-free; review sensitive data and provider policy first. See the
+[shared data-boundary guidance](../README.md#data-boundary).
 
 For speed, the `copilot` backend runs each call against an isolated
 `COPILOT_HOME` with built-in MCP servers and custom instructions disabled, so
@@ -65,12 +72,13 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   | SKILLOPT_SLEEP_REPO="$(pwd)" python3 plugins/copilot/mcp_server.py
 ```
-You should see the server info and the five `sleep_*` tools.
+You should see the server info and all seven `sleep_*` tools.
 
 ## Notes / status
 
 - MCP is the stable, official Copilot extension surface, so this is the most
-  portable of the three integrations (one server → CLI + IDE).
-- The engine and all its controls (gate on/off, multi-rollout, budget,
-  preferences, optimizer/target split) are identical across platforms — see
-  [the SkillOpt-Sleep guide section](https://microsoft.github.io/SkillOpt/docs/guideline.html#sleep).
+  portable shared-engine integration (one server → CLI + IDE).
+- The MCP schema exposes the main CLI's implemented controls, including task and
+  session caps, target-skill selection, scheduling, and staged adoption. It does
+  not add experiment-only gate, rollout, token/time-budget, or optimizer/target
+  split flags. See the [shared CLI reference](../README.md#supported-cli-surface).

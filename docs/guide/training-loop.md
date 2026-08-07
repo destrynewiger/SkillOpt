@@ -37,12 +37,11 @@ scores = evaluate(predictions, ground_truth)
 
 ### 2. Reflect (Backward Pass)
 
-The **optimizer** model analyzes failed trajectories and produces **edit patches** — structured suggestions for improving the skill document.
-
-Two modes:
-
-- **Shallow**: Analyze each trajectory independently
-- **Deep**: Cross-reference multiple failures to find systemic issues
+The **optimizer** model analyzes trajectory minibatches and produces **edit
+patches** — structured suggestions for improving the skill document. Failure
+minibatches are always eligible for analysis; successful trajectories are also
+analyzed unless `gradient.failure_only` is enabled. Independent minibatches can
+run concurrently according to `gradient.analyst_workers`.
 
 ```python
 # Analogy: computing gradients
@@ -74,17 +73,31 @@ Selected edits are applied to the skill document, producing a new version.
 
 ### 6. Gate (Validation)
 
-The updated skill is evaluated on a **selection split** (analogous to a validation set). The update is only accepted if performance improves.
+The updated skill is evaluated on a **selection split** (analogous to a
+validation set). With the gate enabled, the candidate is accepted only when its
+configured gate score (`hard`, `soft`, or `mixed`) is strictly higher than the
+current skill's score. With `evaluation.use_gate: false`, validation is still
+recorded but candidates are force-accepted.
 
 ## Epoch Boundary Mechanisms
 
 ### Slow Update
 
-At the end of each epoch (starting from epoch 2), the system performs a **longitudinal comparison**: it rolls out both the previous epoch's skill and the current skill on the same samples, categorizes items as improved/regressed/persistent_fail/stable_success, then generates high-level **guidance** that is injected into the skill document. This prevents catastrophic forgetting of earlier improvements.
+At the end of each epoch (starting from epoch 2), the system performs a
+**longitudinal comparison**: it rolls out both the previous epoch's skill and
+the current skill on the same samples, categorizes items as
+improved/regressed/persistent-fail/stable-success, then generates high-level
+**guidance** for the skill document. Depending on
+`optimizer.slow_update_gate_with_selection`, that guidance is either checked on
+the selection split or applied unconditionally. Its purpose is to counter
+cross-epoch forgetting.
 
 ### Meta Skill
 
-A **meta-skill memory** accumulates high-level strategy notes across the entire training run. At the end of each epoch, the optimizer reflects on what changed between epochs and produces a compact memory that is provided as additional context during future reflection steps.
+A **meta-skill memory** accumulates high-level strategy notes across the training
+run. Starting at the end of epoch 2, the optimizer compares the previous and
+current epoch, writes a compact memory, and provides the prior epoch's memory as
+additional context during later reflection and update stages.
 
 ## Next Steps
 

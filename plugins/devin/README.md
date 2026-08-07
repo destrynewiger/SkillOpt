@@ -16,7 +16,10 @@ source into the Claude Code-compatible JSONL the engine reads.
 | `harvest_devin.py` | converts Devin ATIF-v1.7 transcripts + agentmemory + `.devin/skills` into JSONL, with `taskKey` + outcome envelopes |
 | `judge.py` | reference judge for the deferred/judge branch of the validation gate |
 | `mcp-config.example.json` | drop-in MCP server config |
-| `devin-rules.snippet.md` | paste into `.devin/rules/skillopt-sleep.md` |
+| `install.sh` | copies hooks + rules into a project's `.devin/` and prints the MCP registration command |
+| `devin-rules.snippet.md` | copied to `.devin/rules/skillopt-sleep.md` by `install.sh` |
+| `hooks/hooks.v1.json` | SessionEnd hook config — installed/merged at `.devin/hooks.v1.json` by `install.sh` |
+| `hooks/on-session-end.sh` | best-effort activity marker script (called by the hook) |
 
 ## What it harvests
 
@@ -33,19 +36,28 @@ After `sleep_adopt`, the evolved skill is synced to `.devin/skills/skillopt-slee
 
 Requires Python ≥ 3.10. No third-party packages — the server is pure stdlib.
 
-1. **Register the MCP server.** Use `mcp-config.example.json` as a template; set
-   `args` to the absolute path of this `mcp_server.py`. The engine is found
-   automatically (this plugin lives inside the SkillOpt repo). Or via the Devin
-   CLI:
+1. **Install hooks + rules into your project.** From the repo root:
+
+   ```bash
+   bash plugins/devin/install.sh /path/to/your/project
+   ```
+
+   This copies the SessionEnd hook and rules snippet into the project's
+   `.devin/` directory and prints the MCP registration command. The hook is
+   on by default — it logs a cheap activity marker for local inspection or
+   external automation when each session ends. The current engine harvests by
+   transcript timestamps and does not consume this marker directly. The hook
+   is non-blocking and spends no API budget. Re-run the script to update; the
+   installer preserves existing hooks and does not duplicate its own entry.
+
+2. **Register the MCP server.** Use `mcp-config.example.json` as a template, or
+   run the command printed by `install.sh`:
 
    ```bash
    devin mcp add skillopt-sleep \
      --env "SKILLOPT_DEVIN_CLAUDE_HOME=$HOME/.skillopt-sleep-devin" \
      -- python3 /abs/path/to/SkillOpt/plugins/devin/mcp_server.py
    ```
-
-2. **(Optional)** copy `devin-rules.snippet.md` to `.devin/rules/skillopt-sleep.md`
-   so Devin proactively offers the tools.
 
 3. Ask Devin: *"run the sleep cycle"*, *"what did the last sleep propose?"*, *"adopt it"*.
 
@@ -54,13 +66,28 @@ Requires Python ≥ 3.10. No third-party packages — the server is pure stdlib.
 | Tool | What it does |
 |---|---|
 | `sleep_status` | nights run so far + latest staged proposal |
-| `sleep_dry_run` | preview cycle — no staging, no changes |
+| `sleep_dry_run` | preview cycle — no staging; a real backend still makes provider calls |
 | `sleep_run` | full cycle; stages a proposal for review |
 | `sleep_adopt` | apply the staged proposal; syncs skill to the workspace |
 | `sleep_harvest` | debug: list the recurring tasks mined |
 | `sleep_schedule` | install a nightly cron entry (`--hour` / `--minute`) |
 | `sleep_unschedule` | remove the nightly cron entry |
 
-Default backend is `mock` (no API spend); `--backend claude|codex` uses your own
-budget. Same engine and `sleep_*` interface as the other plugins — all call
-`python -m skillopt_sleep`.
+Default backend is `mock` (no API spend); the `claude`, `codex`, and `copilot`
+backends use the corresponding authenticated CLI and budget. The `handoff`
+backend runs the cycle with no model subprocess or API key — the engine writes
+pending model calls to `.skillopt-sleep-handoff/PROMPTS.md` + `pending.json`
+(exit code 3) and resumes after answers are placed in `answers/<id>.md`; re-run
+`sleep_run` with the same arguments to resume. The seven tools call the same
+`python -m skillopt_sleep` actions as the other shared-engine integrations.
+
+## Data boundary
+
+The Devin harvester reads local ATIF transcripts, agentmemory, and skill files
+and converts them into the engine's session format. The `mock` backend keeps
+that workflow local. A real backend sends truncated excerpts and derived tasks
+to the selected provider for mining, replay, judging, and reflection. The
+conversion step is not a guarantee that outbound prompts contain no secrets;
+review sensitive sources and provider policy before enabling a real backend.
+See the [shared data-boundary guidance](../README.md#data-boundary) and
+[implemented CLI reference](../README.md#supported-cli-surface).

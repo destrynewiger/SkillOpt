@@ -18,8 +18,10 @@ import hashlib
 import os
 import re
 from collections import Counter
-from typing import Any, Callable, List, Optional, Set, Tuple
+from dataclasses import replace
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from skillopt_sleep.backend import CursorBackendError
 from skillopt_sleep.types import SessionDigest, TaskRecord
 
 
@@ -31,6 +33,18 @@ def _tid(project: str, intent: str) -> str:
 def _short(text: str, n: int = 600) -> str:
     text = (text or "").strip()
     return text if len(text) <= n else text[:n] + " …"
+
+
+def session_skill_hint(digest: SessionDigest) -> str:
+    """Return the session's unambiguous skill, or "" when there is none.
+
+    A session that invoked exactly one skill names the skill its tasks
+    exercised. Zero skills (unknown) and several skills (ambiguous) both
+    return "", which leaves those tasks in the existing catch-all path.
+    """
+    skills = [s for s in (digest.skills_used or []) if s]
+    unique = list(dict.fromkeys(skills))
+    return unique[0] if len(unique) == 1 else ""
 
 
 def _looks_negative(signals: List[str]) -> bool:
@@ -195,6 +209,7 @@ def heuristic_mine(
                 reference="",
                 tags=tags,
                 source_sessions=[d.session_id],
+                skill_hint=session_skill_hint(d),
             )
         )
         if len(tasks) >= max_tasks:
@@ -205,7 +220,10 @@ def heuristic_mine(
 def dedup_tasks(tasks: List[TaskRecord]) -> List[TaskRecord]:
     """Merge tasks sharing an id (same project+intent across sessions)."""
     by_id: dict = {}
+    hints_by_id: dict = {}
     for t in tasks:
+        if t.skill_hint:
+            hints_by_id.setdefault(t.id, set()).add(t.skill_hint)
         if t.id in by_id:
             ex = by_id[t.id]
             ex.source_sessions = list(dict.fromkeys(ex.source_sessions + t.source_sessions))
@@ -215,7 +233,40 @@ def dedup_tasks(tasks: List[TaskRecord]) -> List[TaskRecord]:
                 ex.outcome = t.outcome
         else:
             by_id[t.id] = t
+    for task_id, task in by_id.items():
+        hints = hints_by_id.get(task_id, set())
+        task.skill_hint = next(iter(hints)) if len(hints) == 1 else ""
     return list(by_id.values())
+
+
+def group_tasks_by_skill_hint(
+    tasks: List[TaskRecord],
+    managed_skill_name: str,
+) -> Dict[str, List[TaskRecord]]:
+    """Group mined tasks by their skill hint, in first-seen order.
+
+    A task ID reaches a hinted group only when every observation of it agrees on
+    the same non-empty hint. Missing hints, conflicting hints, and a mixture of
+    hinted and unhinted observations all fall back to ``managed_skill_name`` —
+    the existing catch-all skill — so ambiguous evidence never invents a group.
+    Each task ID is emitted exactly once, with ``dedup_tasks`` merge semantics.
+    """
+    observed: dict = {}
+    for t in tasks:
+        observed.setdefault(t.id, set()).add((t.skill_hint or "").strip())
+
+    # ``dedup_tasks`` merges records in place, so operate on shallow dataclass
+    # copies (including the only list it mutates) rather than caller-owned tasks.
+    copied = [replace(t, source_sessions=list(t.source_sessions)) for t in tasks]
+    groups: Dict[str, List[TaskRecord]] = {}
+    for task in dedup_tasks(copied):
+        hints = observed[task.id]
+        hint = next(iter(hints)) if len(hints) == 1 else ""
+        # Keep the returned record aligned with the normalized evidence used for
+        # routing. In particular, blank and partially observed hints stay empty.
+        task.skill_hint = hint
+        groups.setdefault(hint or managed_skill_name, []).append(task)
+    return groups
 
 
 def assign_splits(
@@ -300,6 +351,8 @@ def mine(
     if llm_miner is not None:
         try:
             tasks = llm_miner(digests) or []
+        except CursorBackendError:
+            raise
         except Exception:
             tasks = []
     if not tasks:

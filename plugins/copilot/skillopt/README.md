@@ -68,9 +68,18 @@ skill"*, or *"evaluate this skill on the dataset"*. Copilot calls the MCP tools:
 
 Common optional args (both train and eval): `env`, `backend`,
 `optimizer_model`, `target_model`, `out_root`, `cfg_options` (space-separated
-`KEY=VALUE` YAML overrides), and `extra_args` (raw passthrough flags for the
-underlying script). `skillopt_train` also accepts `num_epochs`, `batch_size`,
-`seed`, and `use_gate`.
+`section.key=value` YAML overrides), and `extra_args` (raw passthrough flags
+for the underlying script). `skillopt_train` also accepts `num_epochs`,
+`batch_size`, `seed`, and `use_gate`. `use_gate` defaults to `true`; setting it
+to `false` still records validation scores but force-accepts every candidate,
+which changes the optimization semantics.
+
+The MCP schema's `backend` argument follows the underlying script's
+`--backend` choices. Role-specific and generic OpenAI-compatible backends can
+be selected through config or `extra_args` (for example,
+`--optimizer_backend openai_compatible --target_backend openai_compatible`);
+see the repository's [backend guide](../../../docs/guide/new-backend.md) for
+the required environment variables.
 
 Runs can be very long. The server's subprocess timeout defaults to 6 hours;
 override it with the `SKILLOPT_RUN_TIMEOUT` environment variable (seconds).

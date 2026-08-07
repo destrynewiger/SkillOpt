@@ -1,5 +1,13 @@
 # SkillOpt Sleep — Claude Code self-evolving plugin (design)
 
+> **Historical design proposal.** This document records the June 2026 design
+> target and includes planned controls that are not part of the current nightly
+> CLI. It is not an installation or configuration reference. For implemented
+> behavior, flags, defaults, and data boundaries, use
+> [`docs/sleep/README.md`](../../sleep/README.md),
+> [`docs/reference/cli.md`](../../reference/cli.md), and
+> [`plugins/README.md`](https://github.com/microsoft/SkillOpt/blob/main/plugins/README.md).
+
 **Status:** approved-for-build (autonomous offline session, 2026-06-07)
 **Author:** generated for Yifan Yang, executed autonomously while user is asleep
 **Branch:** `feat/claude-code-sleep-plugin` (worktree `my_repo/SkillOpt-sleep`)
@@ -234,4 +242,3 @@ This session targets **Phase 0 + Phase 1 fully**, **Phase 2 scaffolded**, and th
 3. **Real-API demo:** want me to spend live `ANTHROPIC_API_KEY` budget on the persona demo, or keep everything mock until you say go?
 4. **Skill target:** evolve a *new* dedicated `skillopt-sleep`-managed skill, or also edit your existing hand-written skills in `~/.claude/skills`?
 5. **Paper:** should this become a section/figure in the SkillOpt arXiv (Dream+Sleep framing as "deployment-time continual skill optimization")?
-```

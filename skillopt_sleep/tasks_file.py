@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Dict, List, Tuple
 
+from skillopt_sleep.judges import validate_checks
 from skillopt_sleep.mine import assign_splits, normalize_legacy_split
 from skillopt_sleep.types import TaskRecord
 
@@ -78,4 +80,21 @@ def load_tasks_file(
         if not isinstance(item, dict):
             raise ValueError("each task entry must be a JSON object")
         tasks.append(TaskRecord.from_dict(item))
+
+    # Fail loudly on malformed rule judges. A check that cannot work as written
+    # scores 0.0 on every rollout, which reads exactly like a model that never
+    # complies — the run looks legitimate while one dimension is dead.
+    errors: List[str] = []
+    for task in tasks:
+        if task.reference_kind != "rule":
+            continue
+        task_errors, task_warnings = validate_checks(task.judge)
+        errors.extend(f"task {task.id}: {e}" for e in task_errors)
+        for w in task_warnings:
+            print(f"[sleep] warning: task {task.id}: {w}", file=sys.stderr)
+    if errors:
+        raise ValueError(
+            "tasks file contains unusable rule checks:\n  " + "\n  ".join(errors)
+        )
+
     return _normalize_tasks(tasks, holdout_fraction=holdout_fraction, seed=seed), meta
