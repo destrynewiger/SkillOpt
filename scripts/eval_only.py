@@ -30,23 +30,27 @@ from skillopt.utils.console import force_utf8_stdout_stderr
 
 force_utf8_stdout_stderr()
 
-from skillopt.model import (
-    configure_azure_openai,
-    configure_claude_code_exec,
-    configure_codex_exec,
-    configure_copilot_chat,
-    configure_copilot_exec,
-    configure_cursor_exec,
-    configure_minimax_chat,
-    configure_qwen_chat,
-    set_optimizer_backend,
-    set_optimizer_deployment,
-    set_reasoning_effort,
-    set_target_backend,
-    set_target_deployment,
-)
-from skillopt.model.common import default_model_for_backend, normalize_backend_name
-from skillopt.utils import compute_score
+# CLI help only parses arguments; importing provider SDKs can delay its exit.
+# Module imports and actual training/evaluation retain the normal backend setup.
+if __name__ != "__main__" or not {"-h", "--help"}.intersection(sys.argv[1:]):
+    from skillopt.model import (
+        configure_azure_openai,
+        configure_claude_code_exec,
+        configure_codex_exec,
+        configure_copilot_chat,
+        configure_copilot_exec,
+        configure_cursor_exec,
+        configure_minimax_chat,
+        configure_qwen_chat,
+        set_optimizer_backend,
+        set_optimizer_deployment,
+        set_reasoning_effort,
+        set_target_backend,
+        set_target_deployment,
+    )
+    from skillopt.model.common import default_model_for_backend, normalize_backend_name
+    from skillopt.utils import compute_score
+
 
 _OPENAI_DEFAULT_MODEL_SENTINELS = {"gpt-5.4", "gpt-5.5"}
 _ROLE_BACKEND_DEFAULTS = (None, "", "openai_chat")

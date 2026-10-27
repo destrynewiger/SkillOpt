@@ -14,7 +14,7 @@ Common flags:
     --target-skill-path PATH explicit live SKILL.md to stage/adopt
     --tasks-file PATH   reviewed TaskRecord JSON file to replay instead of harvesting
     --backend mock|claude|codex|copilot|cursor|pi|handoff|azure_openai
-    --source claude|codex|copilot|copilot_cli|cursor|pi|auto
+    --source claude|codex|copilot|copilot_cli|cursor|pi|hermes|auto
     --vscode-workspace-storage PATH
     --copilot-cli-session-store PATH
     --model NAME
@@ -83,8 +83,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--codex-home", default="", help="override ~/.codex for archived session harvest")
     p.add_argument("--cursor-home", default="", help="override ~/.cursor for Cursor session harvest")
     p.add_argument("--pi-home", default="", help="override ~/.pi for Pi session harvest")
+    p.add_argument("--hermes-sessions-dir", default="", help="explicit qualified Hermes export directory")
+    p.add_argument("--hermes-manifest", default="", help="owner-qualified Hermes source manifest")
+    p.add_argument("--hermes-owner", default="", help="literal owner identifier from the manifest")
     p.add_argument("--source", default="",
-                   choices=["", "claude", "codex", "copilot", "copilot_cli", "cursor", "pi", "auto"],
+                   choices=["", "claude", "codex", "copilot", "copilot_cli", "cursor", "pi", "hermes", "auto"],
                    help="session transcript source")
     p.add_argument("--vscode-workspace-storage", default="",
                    help="override VS Code User/workspaceStorage root for copilot source")
@@ -136,6 +139,9 @@ def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
         overrides["cursor_home"] = os.path.abspath(os.path.expanduser(args.cursor_home))
     if getattr(args, "source", ""):
         overrides["transcript_source"] = args.source
+    for name in ("hermes_sessions_dir", "hermes_manifest", "hermes_owner"):
+        if getattr(args, name, ""):
+            overrides[name] = getattr(args, name)
     if getattr(args, "vscode_workspace_storage", ""):
         overrides["vscode_workspace_storage"] = os.path.abspath(
             os.path.expanduser(args.vscode_workspace_storage)
@@ -262,6 +268,43 @@ def _flush_handoff(backend, args) -> int:
     return 3
 
 
+def _pin_identity(source: str):
+    import stat
+    info = os.lstat(source)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16 * 1024 * 1024:
+        raise ValueError("handoff pin must be a bounded, single-link regular file")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _preserve_corrupt_pin(cfg, source: str, expected) -> None:
+    """Retain interrupted bytes privately before removing an unusable pin."""
+    import tempfile
+
+    recovery = os.path.join(cfg.state_dir, "handoff-recovery")
+    if os.path.islink(recovery):
+        raise ValueError("handoff recovery directory cannot be a symlink")
+    os.makedirs(recovery, mode=0o700, exist_ok=True)
+    os.chmod(recovery, 0o700)
+    if _pin_identity(source) != expected:
+        raise ValueError("handoff pin changed; retry without replacing newer data")
+    fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as src:
+        info = os.fstat(src.fileno())
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != expected:
+            raise ValueError("handoff pin changed; retry without replacing newer data")
+        payload = src.read(16 * 1024 * 1024 + 1)
+        if len(payload) > 16 * 1024 * 1024:
+            raise ValueError("handoff corrupt pin exceeds recovery limit")
+    dest, _path = tempfile.mkstemp(prefix=os.path.basename(source) + ".", suffix=".corrupt", dir=recovery)
+    with os.fdopen(dest, "wb") as dst:
+        dst.write(payload)
+        dst.flush()
+        os.fsync(dst.fileno())
+    if _pin_identity(source) != expected:
+        raise ValueError("handoff pin changed; private recovery retained, newer pin preserved")
+    os.unlink(source)
+
+
 def _handoff_mine_and_pin(cfg, args, backend, snapshot: str, dry: bool):
     """Harvest + mine with the same knobs as run_sleep_cycle (harvest window,
     target-skill filter, candidate-limit bump, LLM mining — routed through the
@@ -284,17 +327,22 @@ def _handoff_mine_and_pin(cfg, args, backend, snapshot: str, dry: bool):
     digests_path = os.path.join(backend.handoff_dir, "digests.json")
     digests = None
     if os.path.exists(digests_path):
+        pin_identity = _pin_identity(digests_path)
         try:
             with open(digests_path, encoding="utf-8") as f:
                 raw = json.load(f)
+            if not isinstance(raw, list) or any(not isinstance(d, dict) for d in raw):
+                raise ValueError("invalid digest pin")
             known = set(SessionDigest.__dataclass_fields__)
             digests = [SessionDigest(**{k: v for k, v in d.items() if k in known})
                        for d in raw]
-        except Exception:
+        except (ValueError, TypeError):
             # Corrupted/truncated pin (e.g. an interrupted earlier round):
             # fall back to a fresh harvest instead of crashing the run.
             print("[sleep] handoff: digests.json unreadable — re-harvesting",
                   file=sys.stderr)
+            if not dry:
+                _preserve_corrupt_pin(cfg, digests_path, pin_identity)
             digests = None
     if digests is None:
         since = state.last_harvest_for(project)
@@ -304,10 +352,11 @@ def _handoff_mine_and_pin(cfg, args, backend, snapshot: str, dry: bool):
         max_tasks = cfg.get("max_tasks_per_night", 40)
         session_limit = cfg.get("max_sessions_per_night", 0) or max_tasks * 3
         digests = harvest_for_config(cfg, since_iso=since, limit=session_limit)
-        os.makedirs(backend.handoff_dir, exist_ok=True)
-        with open(digests_path, "w", encoding="utf-8") as f:
-            json.dump(_redact_deep([d.to_dict() for d in digests]), f,
-                      ensure_ascii=False, indent=2)
+        if not dry:
+            os.makedirs(backend.handoff_dir, exist_ok=True)
+            with open(digests_path, "w", encoding="utf-8") as f:
+                json.dump(_redact_deep([d.to_dict() for d in digests]), f,
+                          ensure_ascii=False, indent=2)
 
     max_tasks = cfg.get("max_tasks_per_night", 40)
     session_limit = cfg.get("max_sessions_per_night", 0) or max_tasks * 3
@@ -348,6 +397,10 @@ def _handoff_mine_and_pin(cfg, args, backend, snapshot: str, dry: bool):
             # branch, or every later run re-scans the same stale window.
             state.set_last_harvest(project, started)
             state.save()
+            # Drop the pinned (often empty) digests so the NEXT run re-harvests
+            # instead of reloading a []-pin and never calling harvest again.
+            if os.path.exists(digests_path):
+                os.remove(digests_path)
         return 0, None
     payload = make_tasks_payload(
         tasks,
@@ -359,8 +412,9 @@ def _handoff_mine_and_pin(cfg, args, backend, snapshot: str, dry: bool):
     # NOT marked reviewed: feeding this snapshot back through --tasks-file
     # with a real backend must still hit the human-review gate above. The
     # driver itself loads it directly, with the same trust as in-cycle mining.
-    write_tasks_file(snapshot, _redact_deep(payload))
-    print(f"[sleep] handoff: pinned {len(tasks)} tasks -> {snapshot}")
+    if not dry:
+        write_tasks_file(snapshot, _redact_deep(payload))
+        print(f"[sleep] handoff: pinned {len(tasks)} tasks -> {snapshot}")
     return 0, tasks
 
 
@@ -379,13 +433,24 @@ def _run_handoff(cfg, args, *, seed_tasks, task_meta: Dict[str, Any], dry: bool)
     tasks = seed_tasks
     if tasks is None:
         snapshot = os.path.join(hdir, "tasks.json")
+        tasks = None
         if os.path.exists(snapshot):
-            tasks, _meta = load_tasks_file(
-                snapshot,
-                holdout_fraction=cfg.get("holdout_fraction", 0.34),
-                seed=cfg.get("seed", 42),
-            )
-        else:
+            pin_identity = _pin_identity(snapshot)
+            try:
+                tasks, _meta = load_tasks_file(
+                    snapshot,
+                    holdout_fraction=cfg.get("holdout_fraction", 0.34),
+                    seed=cfg.get("seed", 42),
+                )
+            except (ValueError, TypeError):
+                # Interrupted/corrupt pin from an earlier round: re-mine instead
+                # of crashing the run.
+                print("[sleep] handoff: tasks.json unreadable — re-mining",
+                      file=sys.stderr)
+                if not dry:
+                    _preserve_corrupt_pin(cfg, snapshot, pin_identity)
+                tasks = None
+        if tasks is None:
             rc, tasks = _handoff_mine_and_pin(cfg, args, backend, snapshot, dry)
             if tasks is None:
                 return rc

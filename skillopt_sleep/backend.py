@@ -699,6 +699,15 @@ class ClaudeCliBackend(CliBackend):
 
     name = "claude"
 
+    def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
+        if key in self._cache:
+            self.last_call_error = ""
+        out = super()._cached_call(key, prompt, max_tokens=max_tokens)
+        # A transient failure must be retried, not retained as a valid answer.
+        if not out or self.last_call_error:
+            self._cache.pop(key, None)
+        return out
+
     def __init__(self, model: str = "", claude_path: str = "claude", timeout: int = 180) -> None:
         super().__init__(model=model or os.environ.get("SKILLOPT_SLEEP_CLAUDE_MODEL", "") or "sonnet",
                          timeout=timeout)
@@ -739,7 +748,7 @@ class ClaudeCliBackend(CliBackend):
                     "Claude CLI returned a likely auth error: %s",
                     redact_secrets(combined[:200].replace("\n", " ")),
                 )
-                self.last_call_error = combined[:500]
+                self.last_call_error = str(redact_secrets(combined))[:500]
                 return
 
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
@@ -756,6 +765,9 @@ class ClaudeCliBackend(CliBackend):
         #   --exclude-dynamic-...     drop per-machine cwd/env/memory/git sections
         #   cwd=<clean temp>          no project CLAUDE.md
         import tempfile
+        # Reset per call so a prior failure does not make a later successful
+        # call look failed in persisted diagnostics (matches CodexCliBackend).
+        self.last_call_error = ""
         cmd = [self.claude_path, "-p", "--output-format", "text"]
         if os.environ.get("ANTHROPIC_API_KEY"):
             cmd.append("--bare")
@@ -798,6 +810,7 @@ class ClaudeCliBackend(CliBackend):
         # validated honestly: we detect the call from the shim's log, not from
         # a self-reported marker. Other tools are stubbed the same way.
         import tempfile, shutil, stat
+        self.last_call_error = ""
         work = tempfile.mkdtemp(prefix="skillopt_sleep_tools_")
         calllog = os.path.join(work, "_tool_calls.log")
         try:

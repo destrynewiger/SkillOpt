@@ -17,6 +17,14 @@ def harvest_for_config(cfg, *, since_iso: Optional[str] = None, limit: int = 0) 
     scope = cfg.get("projects", "invoked")
     invoked_project = cfg.get("invoked_project", "")
 
+    if source == "hermes":
+        from skillopt_sleep.harvest_hermes import harvest_hermes
+        return harvest_hermes(
+            cfg.get("hermes_sessions_dir", ""),
+            manifest_path=cfg.get("hermes_manifest", ""), owner=cfg.get("hermes_owner", ""),
+            scope=scope, invoked_project=invoked_project, since_iso=since_iso, limit=limit,
+        )
+
     if source == "codex":
         return harvest_codex(
             cfg.codex_archived_sessions_dir,

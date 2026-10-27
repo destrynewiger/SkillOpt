@@ -285,3 +285,7 @@ gate keeps the worst case bounded; keep it **on** by default.
 See the [SkillOpt documentation index](../index.md), the
 [CLI reference](../reference/cli.md), and the integration-specific READMEs under
 [`plugins/`](https://github.com/microsoft/SkillOpt/tree/main/plugins).
+
+## Owner-scoped Hermes source
+
+See [Hermes exports and recovery](hermes-source.md) for the explicit owner/source manifest, offline verification, limits, and inactive rollout. Hermes is excluded from automatic source selection.

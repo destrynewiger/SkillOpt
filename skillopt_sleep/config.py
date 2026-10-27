@@ -29,6 +29,10 @@ DEFAULTS: Dict[str, Any] = {
     "codex_home": CODEX_HOME,
     "pi_home": PI_HOME,
     "cursor_home": CURSOR_HOME,
+    # Hermes is opt-in and never falls back to a global session directory.
+    "hermes_sessions_dir": "",
+    "hermes_manifest": "",
+    "hermes_owner": "",
     "vscode_workspace_storage": "",  # "" => auto-detect platform defaults
     "copilot_cli_session_store": "",  # "" => ~/.copilot/session-store.db
     # Explicit sources also include copilot, copilot_cli, cursor, and pi.
