@@ -215,6 +215,45 @@ class TestHandoffCli(unittest.TestCase):
             state = SleepState.load(cfg.state_path)
             self.assertIsNotNone(state.last_harvest_for(proj))
 
+    def test_no_tasks_removes_digests_pin_so_next_run_reharvests(self):
+        """After a no-task night the (often empty) digests.json pin must be
+        removed, or every later run reloads a []-pin and never harvests again."""
+        from skillopt_sleep.__main__ import main
+
+        with tempfile.TemporaryDirectory() as proj, \
+                tempfile.TemporaryDirectory() as home:
+            hdir = os.path.join(proj, ".skillopt-sleep-handoff")
+            os.makedirs(hdir, exist_ok=True)
+            digests_path = os.path.join(hdir, "digests.json")
+            with open(digests_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+            rc = main([
+                "run", "--backend", "handoff",
+                "--project", proj,
+                "--claude-home", os.path.join(home, ".claude"),
+            ])
+            self.assertEqual(rc, 0)
+            # the empty pin must be gone so the next run re-harvests
+            self.assertFalse(os.path.exists(digests_path))
+
+    def test_corrupt_tasks_pin_falls_back_to_remine(self):
+        """An interrupted/corrupt tasks.json snapshot must not crash the run."""
+        from skillopt_sleep.__main__ import main
+
+        with tempfile.TemporaryDirectory() as proj, \
+                tempfile.TemporaryDirectory() as home:
+            hdir = os.path.join(proj, ".skillopt-sleep-handoff")
+            os.makedirs(hdir, exist_ok=True)
+            with open(os.path.join(hdir, "tasks.json"), "w", encoding="utf-8") as f:
+                f.write('{"tasks": [ truncated...')
+            rc = main([
+                "run", "--backend", "handoff",
+                "--project", proj,
+                "--claude-home", os.path.join(home, ".claude"),
+            ])
+            # corrupt snapshot -> re-mine -> no tasks -> 0 (not a crash)
+            self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,11 @@ from skillopt.utils.console import force_utf8_stdout_stderr
 
 force_utf8_stdout_stderr()
 
-from skillopt.model.common import default_model_for_backend, normalize_backend_name
+# CLI help only parses arguments; importing provider SDKs can delay its exit.
+# Module imports and actual training/evaluation retain the normal backend setup.
+if __name__ != "__main__" or not {"-h", "--help"}.intersection(sys.argv[1:]):
+    from skillopt.model.common import default_model_for_backend, normalize_backend_name
+
 
 _OPENAI_DEFAULT_MODEL_SENTINELS = {"gpt-5.4", "gpt-5.5"}
 _ROLE_BACKEND_DEFAULTS = (None, "", "openai_chat")
